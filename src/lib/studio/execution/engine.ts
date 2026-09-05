@@ -124,7 +124,8 @@ async function doRunExecution(opts: RunExecutionOptions): Promise<RunExecutionRe
       runId: opts.runId ?? null,
       source: opts.source ?? 'terminal',
       trigger: opts.trigger ?? null,
-      command: command.slice(0, 500),
+      // comando é persistido MASCARADO (o input real pode conter tokens)
+      command: maskSecrets(command).slice(0, 500),
       cwd: 'workspace:/',
       status: 'QUEUED',
     },
