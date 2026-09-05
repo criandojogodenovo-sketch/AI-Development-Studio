@@ -77,9 +77,12 @@ export async function readyTasks(projectId: string): Promise<Array<{ id: string;
   return ready.sort((a, b) => prio[a.priority as string] - prio[b.priority as string])
 }
 
-/** Progresso consolidado do projeto (para UI e para o pipeline). */
+/** Progresso consolidado do projeto (para UI e para o pipeline).
+ *  Tarefas CANCELLED (grafos anteriores encerrados por novo pedido) ficam
+ *  fora do progresso e da lista — o histórico vive em runs + eventos. */
 export async function projectProgress(projectId: string) {
-  const tasks = await db.task.findMany({ where: { projectId }, orderBy: { order: 'asc' } })
+  const allTasks = await db.task.findMany({ where: { projectId }, orderBy: { order: 'asc' } })
+  const tasks = allTasks.filter((t) => t.status !== 'CANCELLED')
   const byStatus: Record<string, number> = {}
   for (const t of tasks) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1
   const completed = byStatus.COMPLETED ?? 0

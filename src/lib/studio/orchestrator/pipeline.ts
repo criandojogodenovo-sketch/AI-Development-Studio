@@ -281,6 +281,16 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
 
   // 1) PLANEJAMENTO
   const { plan } = await runPlanner(req)
+
+  // Cada pedido = um NOVO grafo de tarefas. Tarefas não concluídas do grafo
+  // anterior são encerradas como CANCELLED (o histórico completo permanece
+  // em agentRun + eventos de atividade). Evita acúmulo/duplicação de tarefas
+  // mortas (PENDING/BLOCKED/FAILED) entre execuções sucessivas.
+  await db.task.updateMany({
+    where: { projectId: req.projectId, status: { in: ['PENDING', 'BLOCKED', 'FAILED', 'RUNNING'] } },
+    data: { status: 'CANCELLED', error: null },
+  }).catch(() => {})
+
   const taskIds = await createTasksFromPlan(req.projectId, plan)
   evidence.push(`Plano criado com ${taskIds.length} tarefas (arquitetura: ${plan.architecture?.slice(0, 100)})`)
   await db.project.update({ where: { id: req.projectId }, data: { status: 'RUNNING' } })
