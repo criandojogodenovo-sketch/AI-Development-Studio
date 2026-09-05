@@ -8,7 +8,7 @@ export interface ModelDefinition {
   id: string            // ex: glm-5.3-flash
   label: string         // ex: GLM-5.3-Flash
   role: ModelRole
-  provider: 'zai' | 'openai-compatible'
+  provider: 'bai' | 'zai' | 'openai-compatible'
   enabledByDefault: boolean
   description: string
 }

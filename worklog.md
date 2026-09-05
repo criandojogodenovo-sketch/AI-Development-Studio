@@ -97,3 +97,32 @@ Stage Summary — EVIDÊNCIAS FINAIS DO SISTEMA FUNCIONAL:
 - ✅ UI mobile-first verificada no browser com 0 erros
 - ✅ WebSocket + eventos + banco (10 tabelas) operacionais
 - ⚠ Última validação pendente (pipeline 100% COMPLETED) bloqueada por quota externa — não por defeito do sistema
+
+---
+Task ID: 9
+Agent: main (Super Z — LEAD ENGINEER)
+Task: ATUALIZAÇÃO DEFINITIVA — integração B.AI + Neon PostgreSQL + GitHub ao sistema existente (sem reiniciar nada)
+
+Work Log (ANALISAR → ENTENDER → INTEGRAR → IMPLEMENTAR → TESTAR → CORRIGIR → VALIDAR):
+- Estado real examinado antes de tudo: 4 commits locais, main limpa, SEM remote, SQLite via Prisma, .env INDEVIDAMENTE rastreado no git (conteúdo: apenas caminho SQLite, sem secret real) → removido do tracking (git rm --cached)
+- BAIKeyManager (src/lib/studio/models/bai-key-manager.ts): failover KEY1→KEY2 SOMENTE para falhas elegíveis (rede/5xx/timeout/401); 429 NUNCA dispara failover (regra do serviço); máx. 2 tentativas por chamada; cooldown por chave; logs apenas com índice+classe de erro; 30/30 testes unitários (scripts/test-bai-key-manager.ts)
+- BAIProvider (providers/bai-provider.ts): OpenAI-compatible, endpoint BAI_BASE_URL configurável, Authorization server-side, timeout, erros classificados p/ o key manager
+- BUG REAL CORRIGIDO no key manager: acquireKey() readquiria a chave que acabou de falhar (loop de 1 chave) → parâmetro exclude
+- config.ts: GLM_MODEL/QWEN_MODEL/HY3_MODEL/DEEPSEEK_MODEL (com compat MODEL_*) + seção bai (baseUrl, cooldown, failures)
+- ModelRouter: provider físico dinâmico — B.AI quando BAI_API_KEY_1/2 configuradas (produção/Vercel), senão SDK sandbox (z-ai-web-dev-sdk); registro de uso por modelo lógico mantido
+- NEON/POSTGRESQL: schema provider=postgresql (url exclusivamente via env); migration inicial completa gerada (prisma/migrations/20260905000000_init — 10 tabelas, JSONB); PostgreSQL 18.4 REAL embutido levantado em .zscripts/pgtest (:5433, gitignored) para teste de runtime; migrate deploy OK; VALIDAÇÃO CRUD REAL 22/22 (scripts/db-validate.mjs): tabelas, JSONB, upsert economia, isolamento por usuário, cascade, token last-4
+- .env (sandbox) apontado para PG local; dev server reiniciado (causa raiz: shell tinha DATABASE_URL SQLite antiga exportada, sobrepunha .env)
+- BUG REAL CORRIGIDO no pipeline: gate de tentativas permitia maxAttempts+maxReviewCycles=8 execuções (violava MAX_TASK_ATTEMPTS) → agora maxAttempts é ABSOLUTO (3); ciclos de review têm orçamento próprio (MAX_REVIEW_CYCLES) — evidência: tarefa chegou a "tentativa 4/3" no e2e
+- E2E contra PostgreSQL: 14/14 checks de API (registro/login/isolamento/projeto MINI_GAME/workspace/preview/terminal allowlist/DeepSeek off); Master Agent planejou grafo real de 5 tarefas; Coding Agent bloqueado por 429 EXTERNO do provedor do sandbox (quota em cooldown — limitação externa documentada, resposta do sistema dentro do especificado: limits.reached + cooldown 60s + retries limitados)
+- .env.example reestruturado exatamente conforme spec (BAI_API_KEY_1/2, GLM_MODEL..., DATABASE_URL= vazio, GITHUB_CLIENT_ID/SECRET, todos os limites)
+- .gitignore reforçado: .env/.env.*/!.env.example; removida ignore ampla de scripts/ (testes reais agora commitáveis) e de "test" (perigosa); scripts/patch-json-parser.cjs continua ignorado
+- scripts/secret-scan.sh: scan de 12 classes de vazamento em todos os arquivos rastreados → LIMPO
+- README atualizado (B.AI, failover, Neon, deploy Vercel futuro, regras de credenciais)
+- Build de produção OK (13 rotas API dinâmicas + SPA estática); lint 0 erros; TSC sem erros nos arquivos alterados
+
+Stage Summary:
+- Integração B.AI completa com failover controlado validado por 30 testes unitários
+- Caminho Neon validado com PostgreSQL real (22/22) — mesma API/protocolo em produção
+- Bugs reais encontrados e corrigidos com evidência (readquireção de chave; MAX_TASK_ATTEMPTS violado)
+- Pipeline de agentes: planejamento real OK; execução pendente de quota externa do sandbox LLM (429)
+- GitHub: remote oficial a configurar; push PENDENTE (sem credencial no ambiente — documentado no relatório)

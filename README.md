@@ -40,7 +40,8 @@ src/
                               # preview, models, agents, activity, github
   lib/studio/
     config.ts                 # limites e variáveis (server-side)
-    models/                   # ModelRouter + providers (ZAI real)
+    models/                   # ModelRouter + BAIKeyManager + providers
+                              # (B.AI OpenAI-compatible + SDK sandbox)
     agents/                   # definições, prompts, loop ReAct (base.ts)
     tools/                    # Tool Layer: fs, exec, git, github
     executor/                 # ExecutionProvider (local/docker/remote)
@@ -61,14 +62,29 @@ workspaces/<projectId>/       # 1 workspace isolado por projeto
 
 ### Modelos
 
-| Papel | Modelo | Estado |
+| Papel | Modelo (env) | Estado |
 |---|---|---|
-| Master/Orquestrador | GLM-5.3-Flash | ativo |
-| Coding | Qwen3.8-Flash | ativo |
-| Review/QA | Hy3 | ativo |
-| Fallback difícil | DeepSeek-V4-Flash | **DESATIVADO** (`ENABLE_DEEPSEEK=false`) |
+| Master/Orquestrador | GLM-5.3-Flash (`GLM_MODEL`) | ativo |
+| Coding | Qwen3.8-Flash (`QWEN_MODEL`) | ativo |
+| Review/QA | Hy3 (`HY3_MODEL`) | ativo |
+| Fallback difícil | DeepSeek-V4-Flash (`DEEPSEEK_MODEL`) | **DESATIVADO** (`ENABLE_DEEPSEEK=false`) |
 
-DeepSeek só é usado se: explicitamente habilitado + problema difícil + modelos gratuitos falharam + limite diário não atingido. O `ModelRouter` bloqueia qualquer uso acidental.
+Todos os modelos são acessados via **B.AI** (`BAI_API_KEY_1`/`BAI_API_KEY_2`) com **BAIKeyManager** — failover controlado:
+
+- `KEY 1` → falha **elegível** (rede, 5xx, timeout, 401) → `KEY 2` → ambas falham → **erro controlado**;
+- **rate limit (429) NUNCA dispara failover** (regra de uso do serviço);
+- máximo de 2 tentativas HTTP por chamada (1 por chave) — **sem rotação infinita**;
+- cooldown por chave após falhas elegíveis consecutivas;
+- logs apenas com índice da chave e classe do erro — **a chave nunca aparece em logs, UI, código ou mensagens a modelos**.
+
+DeepSeek só é usado se: explicitamente habilitado + problema difícil + modelos gratuitos falharam + limite diário não atingido. O `ModelRouter` bloqueia qualquer uso acidental. O sistema funciona **completamente sem DeepSeek**.
+
+### Banco de dados — Neon PostgreSQL
+
+- Prisma `provider = "postgresql"`, connection string **exclusivamente** via `DATABASE_URL` (env);
+- migrations em `prisma/migrations/` (init completo, 10 tabelas);
+- nunca hardcode, nunca `NEXT_PUBLIC_DATABASE_URL`, nunca em logs;
+- economia de créditos: registro agregado de uso por modelo (`ModelUsage`) com limites configuráveis (chamadas por tarefa, retries, ciclos de review, tool calls, tamanho de contexto) e detecção de loops.
 
 ### Segurança
 
@@ -95,10 +111,12 @@ DeepSeek só é usado se: explicitamente habilitado + problema difícil + modelo
 ## Rodando
 
 ```bash
-cp .env.example .env       # configure AUTH_SECRET e GITHUB_TOKEN (opcional)
-bun run db:push            # cria o banco SQLite
-bun run dev                # studio em :3000
-cd mini-services/events-service && bun install && bun run dev   # eventos (3003/3004)
+cp .env.example .env       # preencha DATABASE_URL (Neon), BAI_API_KEY_1/2, AUTH_SECRET
+npm install
+npx prisma generate         # gera o client PostgreSQL
+npx prisma migrate deploy   # aplica as migrations
+npm run dev                 # studio em :3000
+cd mini-services/events-service && bun install && bun run dev   # eventos (3003/3004, opcional)
 ```
 
 Abra o Studio, registre-se, crie um projeto e escreva na barra de comando:
@@ -106,6 +124,21 @@ Abra o Studio, registre-se, crie um projeto e escreva na barra de comando:
 > "Cria um mini-game 2D de sobrevivência para celular."
 
 O Master planeja, os agentes implementam, testam de verdade e revisam.
+
+## Deploy (Vercel + Neon) — futuro próximo
+
+1. Importe o repositório na Vercel;
+2. Configure as Environment Variables: `DATABASE_URL` (Neon), `BAI_API_KEY_1`, `BAI_API_KEY_2`, `AUTH_SECRET`, `BAI_BASE_URL`, modelos (`GLM_MODEL`...);
+3. `npx prisma migrate deploy` (a Vercel roda o build; a migration pode ser aplicada via Neon ou um passo de build);
+4. Testes pós-deploy.
+
+Sem configurações específicas de Vercel por enquanto — projeto preparado como Next.js padrão (`output: standalone`).
+
+## Segurança de credenciais (regras rígidas)
+
+- `BAI_API_KEY_1/2`, `DATABASE_URL`, `GITHUB_TOKEN`: **somente servidor**;
+- nunca `NEXT_PUBLIC_*` para secrets; nunca em logs; nunca enviados a modelos; nunca commitados (`.env` é gitignored; `.env.example` contém apenas placeholders);
+- GitHub: preferir credencial temporária rotacionável; integração futura via OAuth ou GitHub App.
 
 ## Estado atual (honesto)
 

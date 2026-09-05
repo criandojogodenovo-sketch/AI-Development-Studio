@@ -1,12 +1,14 @@
 // AI DEVELOPMENT STUDIO — Prisma Schema
-// Banco de dados SQLite (arquivo local em ./db)
+// Banco de dados: PostgreSQL (Neon em produção)
+// A connection string vem EXCLUSIVAMENTE de DATABASE_URL (env).
+// NUNCA hardcode; NUNCA NEXT_PUBLIC_DATABASE_URL; NUNCA em logs.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

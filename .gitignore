@@ -1,4 +1,4 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# See https://help.github.com/articles/ignoring-files/ for more information.
 
 # dependencies
 node_modules
@@ -30,34 +30,39 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# ============ SECRETS / ENV (NUNCA COMMITAR) ============
+# .env e variantes — nenhuma configuração com secrets entra no Git
+.env
+.env.*
+!.env.example
+*.env
+.envrc
 
 # vercel
 .vercel
 
-
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sandbox local / artefatos de desenvolvimento
 local-*
 .claude
 .z-ai-config
+.zscripts/
 *.log
 dev.log
 dev.out.log
-test
-prompt
-
-server.log
-# Skills directory
-/skills/
-# AI Development Studio — isolamento de workspaces de agentes
-workspaces/
-db/*.db
-dev.log
 server.log
 events-service.log
-.z-ai-config
-.zscripts/
-scripts/
+prompt
+
+# diretórios do sandbox (não fazem parte do projeto oficial)
+/skills/
+/mini-services/node_modules/
+workspaces/
+db/*.db
+db/*.db-journal
+
+# scripts auxiliares do sandbox (ferramentas de patch one-off)
+scripts/patch-json-parser.cjs

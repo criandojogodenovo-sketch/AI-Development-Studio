@@ -7,58 +7,81 @@
 //   4. DeepSeek-V4-Flash → DESATIVADO POR PADRÃO (ENABLE_DEEPSEEK=false)
 //      Somente se: explicitamente habilitado + problema difícil +
 //      modelos gratuitos falharam + limites diários permitirem.
+// Provedor físico: B.AI (BAI_API_KEY_1/2 com failover controlado)
+// quando configurado; neste sandbox, fallback para o SDK local.
 // Também: verificação de disponibilidade, controles de limite,
 // registro de uso (ModelUsage) — nunca uso acidental do DeepSeek.
 // ============================================================
 
 import { db } from '@/lib/db'
 import { STUDIO_CONFIG } from '../config'
+import { BAIProvider } from './providers/bai-provider'
 import { ZAIProvider } from './providers/zai-provider'
 import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, ModelRole } from './types'
 
 // ---------- REGISTRO DE MODELOS LÓGICOS ----------
-// O provider físico real disponível neste ambiente é o ZAI SDK.
+// O provider físico real (B.AI ou SDK sandbox) é decidido em tempo de
+// execução: chaves B.AI configuradas → 'bai'; caso contrário → 'zai'.
 // Modelos lógicos diferenciam-se por papel, prompt e parâmetros,
 // e o uso é registrado por modelo lógico (rastreabilidade real).
 
-export const MODEL_REGISTRY: ModelDefinition[] = [
-  {
-    id: 'glm-5.3-flash',
-    label: 'GLM-5.3-Flash',
-    role: 'master',
-    provider: 'zai',
-    enabledByDefault: true,
-    description: 'Master Agent / Orquestrador — análise, planejamento, decisões',
-  },
-  {
-    id: 'qwen3.8-flash',
-    label: 'Qwen3.8-Flash',
-    role: 'coding',
-    provider: 'zai',
-    enabledByDefault: true,
-    description: 'Coding Agent — implementação de código e correções',
-  },
-  {
-    id: 'hy3',
-    label: 'Hy3',
-    role: 'review',
-    provider: 'zai',
-    enabledByDefault: true,
-    description: 'Review/QA — revisão de código, qualidade, segurança',
-  },
-  {
-    id: 'deepseek-v4-flash',
-    label: 'DeepSeek-V4-Flash',
-    role: 'deepseek',
-    provider: 'zai',
-    enabledByDefault: false, // DESATIVADO POR PADRÃO — regra de negócio
-    description: 'Fallback para problemas difíceis. Requer ENABLE_DEEPSEEK=true.',
-  },
-]
+// Nome de provider físico ativo (server-side only, sem secrets)
+function activeProviderName(): 'bai' | 'zai' {
+  const k1 = (process.env.BAI_API_KEY_1 ?? '').trim()
+  const k2 = (process.env.BAI_API_KEY_2 ?? '').trim()
+  return k1 || k2 ? 'bai' : 'zai'
+}
+
+function buildRegistry(): ModelDefinition[] {
+  const provider = activeProviderName()
+  return [
+    {
+      id: STUDIO_CONFIG.models.master,
+      label: 'GLM-5.3-Flash',
+      role: 'master',
+      provider,
+      enabledByDefault: true,
+      description: 'Master Agent / Orquestrador — análise, planejamento, decisões',
+    },
+    {
+      id: STUDIO_CONFIG.models.coding,
+      label: 'Qwen3.8-Flash',
+      role: 'coding',
+      provider,
+      enabledByDefault: true,
+      description: 'Coding Agent — implementação de código e correções',
+    },
+    {
+      id: STUDIO_CONFIG.models.review,
+      label: 'Hy3',
+      role: 'review',
+      provider,
+      enabledByDefault: true,
+      description: 'Review/QA — revisão de código, qualidade, segurança',
+    },
+    {
+      id: STUDIO_CONFIG.models.deepseek,
+      label: 'DeepSeek-V4-Flash',
+      role: 'deepseek',
+      provider,
+      enabledByDefault: false, // DESATIVADO POR PADRÃO — regra de negócio
+      description: 'Fallback para problemas difíceis. Requer ENABLE_DEEPSEEK=true.',
+    },
+  ]
+}
+
+export const MODEL_REGISTRY: ModelDefinition[] = buildRegistry()
 
 export class ModelRouter {
-  private providers: Record<string, LLMProvider> = {
-    zai: new ZAIProvider(),
+  private providers: Record<string, LLMProvider>
+
+  constructor() {
+    // Provider físico: B.AI (com failover de chaves) quando configurado;
+    // caso contrário, SDK do sandbox — a arquitetura de agentes não muda.
+    this.providers =
+      activeProviderName() === 'bai'
+        ? { bai: new BAIProvider() }
+        : { zai: new ZAIProvider() }
   }
   // Throttle global: intervalo mínimo entre chamadas LLM (evita 429)
   private lastCallAt = 0
@@ -93,7 +116,7 @@ export class ModelRouter {
     const def = MODEL_REGISTRY.find((m) => m.id === modelId)
     if (!def) return { available: false, reason: 'modelo não registrado' }
 
-    if (def.id === 'deepseek-v4-flash') {
+    if (def.id === STUDIO_CONFIG.models.deepseek) {
       if (!STUDIO_CONFIG.models.enableDeepseek) {
         return { available: false, reason: 'ENABLE_DEEPSEEK=false (desativado por padrão)' }
       }
@@ -117,7 +140,7 @@ export class ModelRouter {
 
   private async deepseekUsageToday(): Promise<number> {
     const rec = await db.modelUsage.findUnique({
-      where: { day_model: { day: this.today(), model: 'deepseek-v4-flash' } },
+      where: { day_model: { day: this.today(), model: STUDIO_CONFIG.models.deepseek } },
     })
     return rec?.requests ?? 0
   }
@@ -130,7 +153,7 @@ export class ModelRouter {
     const def = MODEL_REGISTRY.find((m) => m.id === modelId)
     if (!def) throw Object.assign(new Error(`MODELO_DESCONHECIDO: ${modelId}`), { code: 'UNAVAILABLE' })
 
-    if (def.id === 'deepseek-v4-flash') {
+    if (def.id === STUDIO_CONFIG.models.deepseek) {
       const gate = await this.isModelAvailable(def.id)
       if (!gate.available) {
         throw Object.assign(
@@ -186,9 +209,9 @@ export class ModelRouter {
         (primaryErr as { code?: string }).code !== 'DISABLED'
 
       if (wantFallback) {
-        const gate = await this.isModelAvailable('deepseek-v4-flash')
+        const gate = await this.isModelAvailable(STUDIO_CONFIG.models.deepseek)
         if (gate.available) {
-          const result = await this.chat('deepseek-v4-flash', messages, opts)
+          const result = await this.chat(STUDIO_CONFIG.models.deepseek, messages, opts)
           return { result, usedFallback: true }
         }
       }

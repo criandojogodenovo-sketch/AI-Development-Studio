@@ -2,6 +2,8 @@
 // AI DEVELOPMENT STUDIO — Configuração central (server-side only)
 // Todos os limites do sistema são definidos aqui.
 // Secrets NUNCA são expostos ao frontend (sem NEXT_PUBLIC_*).
+// Modelos acessados via B.AI (BAI_API_KEY_1/2) com failover;
+// neste sandbox, fallback para o SDK local (z-ai-web-dev-sdk).
 // ============================================================
 
 function num(v: string | undefined, fallback: number): number {
@@ -15,16 +17,30 @@ function bool(v: string | undefined, fallback: boolean): boolean {
 }
 
 export const STUDIO_CONFIG = {
-  // ---------- MODELOS (roteamento lógico) ----------
+  // ---------- MODELOS (nomenclatura oficial: GLM_MODEL/QWEN_MODEL/HY3_MODEL/DEEPSEEK_MODEL) ----------
   models: {
-    master: process.env.MODEL_MASTER ?? 'glm-5.3-flash',
-    coding: process.env.MODEL_CODING ?? 'qwen3.8-flash',
-    review: process.env.MODEL_REVIEW ?? 'hy3',
-    deepseek: 'deepseek-v4-flash',
-    // DeepSeek DESATIVADO POR PADRÃO — somente fallback configurável
+    // GLM → Master/Orquestrador (compat: MODEL_MASTER)
+    master: process.env.GLM_MODEL ?? process.env.MODEL_MASTER ?? 'glm-5.3-flash',
+    // Qwen → Coding/Implementação (compat: MODEL_CODING)
+    coding: process.env.QWEN_MODEL ?? process.env.MODEL_CODING ?? 'qwen3.8-flash',
+    // Hy3 → Review/QA (compat: MODEL_REVIEW)
+    review: process.env.HY3_MODEL ?? process.env.MODEL_REVIEW ?? 'hy3',
+    // DeepSeek → emergência/fallback OPCIONAL
+    deepseek: process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-flash',
+    // DeepSeek DESATIVADO POR PADRÃO — somente fallback configurável.
+    // O sistema funciona COMPLETAMENTE sem DeepSeek.
     enableDeepseek: bool(process.env.ENABLE_DEEPSEEK, false),
     deepseekMaxDailyRequests: num(process.env.DEEPSEEK_MAX_DAILY_REQUESTS, 10),
     requestTimeoutMs: num(process.env.MODEL_REQUEST_TIMEOUT_MS, 180_000),
+  },
+
+  // ---------- B.AI (gateway dos modelos; server-side ONLY) ----------
+  bai: {
+    // Endpoint OpenAI-compatible da B.AI (configurável)
+    baseUrl: process.env.BAI_BASE_URL ?? 'https://api.b.ai/v1',
+    // Cooldown local por chave após N falhas elegíveis consecutivas
+    failuresBeforeCooldown: num(process.env.BAI_FAILURES_BEFORE_COOLDOWN, 3),
+    cooldownMs: num(process.env.BAI_KEY_COOLDOWN_MS, 60_000),
   },
 
   // ---------- LIMITES DO LOOP (nunca loop infinito) ----------

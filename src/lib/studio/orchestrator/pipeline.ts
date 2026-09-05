@@ -302,8 +302,19 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
     const task = ready[0]
     const freshTask = await db.task.findUnique({ where: { id: task.id } })
     if (!freshTask) continue
-    if (freshTask.attempts >= freshTask.maxAttempts + STUDIO_CONFIG.limits.maxReviewCycles) {
-      await transitionTask(freshTask.id, 'FAILED', { error: 'MAX_TASK_ATTEMPTS excedido' })
+    // LIMITE RÍGIDO: maxAttempts é ABSOLUTO por tarefa. Ciclos de review
+    // têm orçamento próprio (MAX_REVIEW_CYCLES, aplicado em runReviewCycle)
+    // e NÃO ampliam as tentativas da tarefa (limite único e honesto).
+    if (freshTask.attempts >= freshTask.maxAttempts) {
+      await transitionTask(freshTask.id, 'FAILED', {
+        error: `MAX_TASK_ATTEMPTS (${freshTask.maxAttempts}) excedido — estado preservado para diagnóstico`,
+      })
+      await emitEvent({
+        type: 'limits.reached',
+        projectId: req.projectId,
+        taskId: freshTask.id,
+        message: `MAX_TASK_ATTEMPTS (${freshTask.maxAttempts}) excedido para "${freshTask.title}" — tarefa interrompida com diagnóstico`,
+      })
       continue
     }
 

@@ -10,8 +10,10 @@
 import { createServer } from 'http'
 import { Server } from 'socket.io'
 
-const SOCKET_PORT = 3003
-const INGEST_PORT = 3004
+// Portas configuráveis via env (server-side; opcional no deploy —
+// sem este serviço a UI degrada para polling /api/activity)
+const SOCKET_PORT = Number(process.env.EVENTS_PORT ?? 3003)
+const INGEST_PORT = Number(process.env.EVENTS_INGEST_PORT ?? 3004)
 
 // ---------- Socket.io (clientes da UI) ----------
 const socketServer = createServer()
