@@ -203,22 +203,26 @@ def run():
             ok("mobile: drawer com navegação completa", all(x in dtext for x in ["Início", "Projetos", "Git", "Diagnóstico"]))
             # sem tabs inferiores (nav fixa bottom com 5 colunas foi removida)
             ok("mobile: sem bottom-tabs legadas", mpage.locator("nav.fixed.bottom-0.grid-cols-5").count() == 0)
-            # navega para workspace
-            wbtn = drawer.locator("text=Workspace").first
-            if wbtn.count() > 0:
-                wbtn.click()
-                mpage.wait_for_timeout(2500)
-                mpage.screenshot(path=f"{SHOTS}/m04-workspace-mobile.png")
-                mbody = mpage.locator("body").inner_text()
-                ok("mobile: workspace com sub-abas", "Editor" in mbody and "Terminal" in mbody and "Poskli" in mbody)
+            # navega: Projetos → abre o projeto → Workspace
+            pbtn = drawer.locator("text=Projetos").first
+            if pbtn.count() > 0:
+                pbtn.click()
+                mpage.wait_for_timeout(1800)
+                proj = mpage.locator(f"text=Browser Test {TS}").first
+                if proj.count() > 0:
+                    proj.click()
+                    mpage.wait_for_timeout(3500)
+                    mpage.screenshot(path=f"{SHOTS}/m04-workspace-mobile.png")
+                    mbody = mpage.locator("body").inner_text()
+                    ok("mobile: workspace com sub-abas", "Editor" in mbody and "Terminal" in mbody and "Poskli" in mbody, "")
 
-                # sub-aba terminal
-                tbtn = mpage.locator("button:has-text('Terminal')")
-                if tbtn.count() > 0:
-                    tbtn.first.click()
-                    mpage.wait_for_timeout(1200)
-                    mpage.screenshot(path=f"{SHOTS}/m05-terminal-mobile.png")
-                    ok("mobile: terminal acessível", mpage.locator("input[placeholder*='comando']").count() > 0)
+                    # sub-aba terminal
+                    tbtn = mpage.locator("button:has-text('Terminal')")
+                    if tbtn.count() > 0:
+                        tbtn.first.click()
+                        mpage.wait_for_timeout(1200)
+                        mpage.screenshot(path=f"{SHOTS}/m05-terminal-mobile.png")
+                        ok("mobile: terminal acessível", mpage.locator("input[placeholder*='comando']").count() > 0)
 
         ok("mobile: sem page errors", len(merrors) == 0, f"{len(merrors)}")
         mctx.close()

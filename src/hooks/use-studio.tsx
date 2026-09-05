@@ -111,9 +111,14 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   }, [user, refreshProjects, api])
 
   // ---- WebSocket: eventos em tempo real ----
+  // Produção (Vercel) não possui o mini-service socket.io (porta 3003 é do
+  // sandbox) → NÃO conecta lá; a UI vive de polling (comportamento atual).
+  // Em outros hosts, tenta com retry limitado (2x) — sem loop infinito.
   useEffect(() => {
     if (!user) return
-    const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'] })
+    const isVercel = typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app')
+    if (isVercel) return
+    const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'], reconnectionAttempts: 2, timeout: 4000 })
     socketRef.current = socket
     socket.on('connect', () => setWsConnected(true))
     socket.on('disconnect', () => setWsConnected(false))
