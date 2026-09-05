@@ -8,8 +8,8 @@ import urllib.request
 ENV_FILE = "/home/z/my-project/.env"
 PROJECT_ID = "prj_JlAHgua53UYdAnmDhaLykQSeg0CW"
 TEAM_ID = "team_UwVqmKiOfeuCvwjfmZl8ryPr"
-NEW_SHA_PREFIX = "2a8bc92"
-EVIDENCE = "/home/z/my-project/.zscripts/vercel-diag/dep-mission18-final2.json"
+NEW_SHA_PREFIX = "ab97b5f"
+EVIDENCE = "/home/z/my-project/.zscripts/vercel-diag/dep-mission18-final3.json"
 
 
 def read_token() -> str:

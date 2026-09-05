@@ -346,3 +346,29 @@ Stage Summary:
 - WORKSPACES_ROOT RESOLVIDO: criação de projeto/arquivos 100% funcional em produção (todos os smoke tests de API PASS, 11/11)
 - Chamada real de modelo NÃO concluída: pipeline congela pós-resposta em serverless (limitação arquitetural do fire-and-forget, NÃO de config; correção exige código — aguarda autorização)
 - Deploy íntegro: dpl_3vdPv8mNNFaiamTjQtr4rZwJ5JdP READY, zero 500s, boot validado, uso real paralelo confirmado
+
+---
+Task ID: 18
+Agent: main (Super Z — LEAD ENGINEER)
+Task: MISSÃO DEFINITIVA — auditoria, correção e estabilização exaustiva do AI Development Studio
+
+Work Log (AUDITAR → REPRODUZIR → CORRIGIR → TESTAR → DEPLOYAR → RE-AUDITAR — 7 commits, 8 deploys):
+- FASE 1 (inspeção): Explore agent + greps → branding ZAI localizado em layout.tsx (title "Z.ai Code Scaffold", favicon EXTERNO z-cdn.chatglm.cn, OG/twitter/autores Z.ai, lang=en) + public/logo.svg (Z animada da Z.ai); react-markdown JÁ em package.json sem uso; resultados de agentes nunca chegavam à UI; rate-limit/estados/labels técnicos mapeados
+- FASE 2 (browser): fluxo real completo na produção com screenshots + VLM → title ZAI confirmado na aba; GLM/Qwen/DeepSeek/ENABLE_DEEPSEEK expostos na view de modelos; pipeline congela (24s+ sem tarefas — sem feedback); sidebar desktop sobrepõe conteúdo ≤1400px; console limpo
+- COMMIT 16f8d39 (branding+pipeline+markdown+produto): layout 100% AI Development Studio + app/icon.svg próprio (favicon local, Z.ai removido) + lang=pt-BR; run/route com after() do next/server (pipeline sobrevive ao 202) + recuperação de runs travados >10min; pipeline com clamp 270s no Vercel + reconciliação RUNNING→FAILED; componente Markdown (react-markdown+remark-gfm instalado via bun); task-graph expõe result/description → detalhe expansível por tarefa; polling 4s durante execução (produção sem WS); labels de produto (Planejador/Engenheiro/Revisor/Verificador); sidebar sem sobreposição (md:pl-44); badge offline removido; dedup do feed; bus com id/createdAt no payload WS + pruning 30d
+- TESTE REAL revelou camada 2: "ERRO_DO_AGENTE: DEEPSEEK_BLOQUEADO: ENABLE_DEEPSEEK=false" em TODA chamada LLM → COMMIT 2ed5fa0: env vars de modelo VAZIAS na Vercel + ?? não substitui '' → todos os ids = '' → gate DeepSeek (''==='') bloqueava tudo (planner caía no plano fallback determinístico — explica tasks genéricas históricas); envStr() aplicado
+- Camada 3: "BAI_FALHA: key#1 UNKNOWN" → COMMIT f4395fc: diagnóstico real do provider (console.warn + corpo da resposta; erro do provedor mesmo com HTTP 200; fix NaN do recordUsage)
+- Camada 4 (RAIZ FINAL): "Failed to parse URL from /chat/completions" → BAI_BASE_URL VAZIA → endpoint relativo → COMMIT 5cea21c: envStr no bai.baseUrl + provider
+- EVIDÊNCIA DE MODELO REAL: Requisições hoje 189, Tokens 664.8k; runs master/PLAN COMPLETED (2933+1558 tok), coding/TASK COMPLETED (7378+418 tok), review rodou (14897+2832 tok); tool.completed run_tests OK + test.passed node--test — FERRAMENTAS EXECUTARAM DE VERDADE
+- COMMIT c9843f2: duplicação de tarefas entre runs eliminada (grafo anterior → CANCELLED; progresso ignora canceladas)
+- COMMIT 8b22f21 + 2a8bc92: eventos em linguagem de produto (agent.failed/pipeline.failed/limits.reached/project.created com nome de template; detalhe técnico em data/task detail)
+- COMMIT ab97b5f: scripts de operação (poll Vercel, auditoria visual)
+- VALIDAÇÃO FINAL: 12/12 smoke tests API PASS; browser title "AI Development Studio" + favicon local 200; models view 100% produto (zero GLM/Qwen/ENABLE); VLM final dashboard "OK"; mobile nav geometricamente íntegra (bottom=viewport, falso positivo VLM); runtime logs ZERO 500s; deploy final READY
+
+Stage Summary:
+- 7 commits (16f8d39, 2ed5fa0, f4395fc, 5cea21c, c9843f2, 8b22f21, 2a8bc92, ab97b5f) → 8 deploys, todos READY, zero erros de plataforma
+- DEPLOYMENT FINAL: dpl_5Gg5iPXCasJDFs6oWGPUJijvpnsb (sha ab97b5f) — produção https://ai-development-studio-gamma.vercel.app
+- BRANDING ZAI 100% ELIMINADO (title/favicon/OG/lang/logo) — origem era o scaffold Z.ai no layout
+- PIPELINE FUNCIONAL: after() + modelos roteando corretamente + ciclo perfeição real (implementa→revisa→corrige) + ferramentas executando
+- LIMITAÇÃO EXTERNA REMANESCENTE: B.AI rate limit 429 (conta do usuário) — tratado honestamente (cooldown 60s, tentativas, erro claro na tarefa); /tmp efêmero por instância lambda (arquivos da run podem não aparecer no listing de outra instância) — persistência de workspaces segue fora de escopo (sem credencial de storage)
+- git local = remoto = ab97b5f; secrets preservados (zero em código/commits/logs)
