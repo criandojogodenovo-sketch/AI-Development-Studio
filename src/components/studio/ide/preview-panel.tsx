@@ -149,7 +149,7 @@ export function PreviewPanel({
             src={previewUrl}
             title="preview desktop"
             className="w-full h-full border border-zinc-800 rounded bg-white"
-            sandbox="allow-scripts allow-pointer-lock allow-forms allow-modals"
+            sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-forms allow-modals"
             onLoad={() => setStatus((s) => (s === 'LOADING' ? 'READY' : s))}
           />
         ) : (
@@ -163,7 +163,7 @@ export function PreviewPanel({
               src={previewUrl}
               title={`preview ${viewport}`}
               className="w-full h-full"
-              sandbox="allow-scripts allow-pointer-lock allow-forms allow-modals"
+              sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-forms allow-modals"
               onLoad={() => setStatus((s) => (s === 'LOADING' ? 'READY' : s))}
             />
           </div>

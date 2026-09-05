@@ -14,6 +14,18 @@ import { useIde } from './use-ide'
 // carrega Monaco dos assets locais (antes do primeiro mount)
 loader.config({ paths: { vs: '/monaco/vs' } })
 
+// Workers do Monaco PRECISAM de URL absoluta (worker não resolve relativo)
+if (typeof window !== 'undefined' && !(window as { MonacoEnvironment?: unknown }).MonacoEnvironment) {
+  ;(window as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
+    getWorkerUrl: () => {
+      const baseUrl = `${window.location.origin}/monaco/vs/`
+      return `data:text/javascript;charset=utf-8,${encodeURIComponent(
+        `self.MonacoEnvironment={baseUrl:'${baseUrl}'};importScripts('${baseUrl}base/worker/workerMain.js');`
+      )}`
+    },
+  }
+}
+
 // ---------- TEMAS (defineTheme) ----------
 interface ThemeSpec {
   base: 'vs' | 'vs-dark' | 'hc-black'
