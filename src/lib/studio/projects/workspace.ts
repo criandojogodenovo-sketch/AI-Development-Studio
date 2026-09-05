@@ -16,7 +16,7 @@ export function projectRoot(projectId: string): string {
   return path.join(STUDIO_CONFIG.executor.workspacesRoot, projectId)
 }
 
-/** Cria workspace com template e README. */
+/** Cria workspace com template e README (DB = fonte da verdade + disco). */
 export async function createWorkspace(
   projectId: string,
   name: string,
@@ -29,11 +29,19 @@ export async function createWorkspace(
   const template = getTemplate(type)
   const files = [...template.files, readmeFor(name, type, description)]
 
+  // 1) disco (materialização imediata p/ agents/execução)
   for (const f of files) {
     const abs = path.join(root, f.path)
     validateFilePath(abs)
     await fs.mkdir(path.dirname(abs), { recursive: true })
     await fs.writeFile(abs, f.content, 'utf8')
+  }
+
+  // 2) DB (persistência — fonte da verdade; o dual-write do provider
+  //    regrava o disco e registra o marker de sincronização)
+  const { workspaceProvider } = await import('../workspace/db-provider')
+  for (const f of files) {
+    await workspaceProvider.writeFile(projectId, f.path, f.content, 'utf8')
   }
   return { rootPath: root, fileCount: files.length }
 }

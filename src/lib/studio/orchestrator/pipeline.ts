@@ -27,6 +27,7 @@ import {
 import { createTasksFromPlan, readyTasks, projectProgress, transitionTask } from './task-graph'
 import { emitEvent } from '../events/bus'
 import { projectRoot } from '../projects/workspace'
+import { ensureMaterialized, syncBackToDb } from '../workspace/sync'
 import { RepeatedFailureDetector } from './loop-detector'
 
 export interface PipelineRequest {
@@ -279,6 +280,15 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
   await db.project.update({ where: { id: req.projectId }, data: { status: 'PLANNING' } })
   await emitEvent({ type: 'pipeline.started', projectId: req.projectId, message: `Pipeline iniciado: "${req.userRequest.slice(0, 150)}"` })
 
+  // WORKSPACE PERSISTENTE: garante disco = DB antes dos agentes lerem
+  // (instância serverless fria → materializa do banco) e sincroniza de
+  // volta no fim (captura artefatos gerados por comandos/testes).
+  try {
+    await ensureMaterialized(req.projectId)
+  } catch (e) {
+    evidence.push(`AVISO: materialização do workspace falhou: ${(e as Error).message}`)
+  }
+
   // 1) PLANEJAMENTO
   const { plan } = await runPlanner(req)
 
@@ -386,7 +396,15 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
     }
   }
 
-  // 3) VALIDAÇÃO FINAL (progresso + testes finais)
+  // 3) SYNC FINAL: disco → DB (persiste artefatos de comandos; DB é a verdade)
+  try {
+    const sync = await syncBackToDb(req.projectId)
+    if (sync.synced > 0 || sync.removed > 0) {
+      evidence.push(`workspace sincronizado: ${sync.synced} arquivo(s) persistido(s)`)
+    }
+  } catch { /* best-effort */ }
+
+  // 4) VALIDAÇÃO FINAL (progresso + testes finais)
   // Reconciliação: nenhuma tarefa pode permanecer RUNNING após o fim do loop
   // (run encerrado — por conclusão, deadline ou falha estrutural)
   const orphan = await db.task.updateMany({

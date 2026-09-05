@@ -2,16 +2,16 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitApi, clientIp } from '@/lib/studio/security/rate-limit'
-import { executeAllowedCommand, checkCommand } from '@/lib/studio/security/commands'
-import { emitEvent } from '@/lib/studio/events/bus'
+import { runExecution } from '@/lib/studio/execution/engine'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
 /**
- * POST /api/terminal — executa comando PERMITIDO no workspace,
- * para o DONO do projeto (mesma allowlist e limites dos agentes).
- * Painel TERMINAL do workspace.
+ * POST /api/terminal — LEGADO (compatibilidade): executa comando
+ * permitido e retorna resultado único. Agora roda pelo EXECUTION
+ * ENGINE (registro persistido + sync do workspace).
+ * Novo terminal em tempo real: POST /api/executions (streaming SSE).
  */
 export async function POST(req: Request) {
   const user = await getSessionUser(req)
@@ -29,33 +29,23 @@ export async function POST(req: Request) {
   const project = await db.project.findFirst({ where: { id: projectId, userId: user.id } })
   if (!project) return NextResponse.json({ error: 'PROJETO_NÃO_ENCONTRADO' }, { status: 404 })
 
-  const check = checkCommand(command)
-  if (!check.allowed) {
-    return NextResponse.json(
-      { ok: false, exitCode: 126, stdout: '', stderr: `COMANDO NEGADO: ${check.reason}`, durationMs: 0 },
-      { status: 200 }
-    )
-  }
-
-  const res = await executeAllowedCommand(command, project.rootPath)
-
-  await emitEvent({
-    type: 'tool.completed',
+  const res = await runExecution({
     projectId,
-    tool: 'terminal',
-    agent: 'user:' + user.name,
-    action: command.slice(0, 120),
-    status: res.exitCode === 0 ? 'OK' : 'ERROR',
-    message: `Terminal: ${command} → exit ${res.exitCode}`,
-    durationMs: res.durationMs,
+    command,
+    userId: user.id,
+    source: 'terminal',
+    trigger: `user:${user.name}`,
   })
 
   return NextResponse.json({
-    ok: res.exitCode === 0,
+    ok: res.status === 'SUCCESS',
     exitCode: res.exitCode,
     stdout: res.stdout.slice(0, 20_000),
     stderr: res.stderr.slice(0, 8_000),
     durationMs: res.durationMs,
     timedOut: res.timedOut,
+    status: res.status,
+    executionId: res.executionId,
+    syncedFiles: res.syncedFiles,
   })
 }

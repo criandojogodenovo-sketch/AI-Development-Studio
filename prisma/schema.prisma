@@ -209,6 +209,97 @@ model GithubConnection {
 }
 
 // ============================================================
+// WORKSPACE FILES (armazenamento persistente — DATABASE é a fonte
+// da verdade; o disco (/tmp) é apenas materialização p/ execução)
+// ============================================================
+
+model WorkspaceFile {
+  id        String   @id @default(cuid())
+  projectId String
+  path      String   // caminho relativo SEM barra inicial ("src/app/page.tsx")
+  isDir     Boolean  @default(false)
+  encoding  String   @default("utf8") // utf8 | base64 (binários/git objects)
+  content   String?  // null para diretórios
+  size      Int      @default(0)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, path])
+  @@index([projectId])
+}
+
+// ============================================================
+// WORKSPACE SNAPSHOTS (versionamento do workspace)
+// ============================================================
+
+model WorkspaceSnapshot {
+  id         String   @id @default(cuid())
+  projectId  String
+  label      String
+  reason     String   @default("manual") // manual | poskli | pre-execution | pre-fix
+  files      Json     // [{ path, isDir, encoding, content }] (limitado por tamanho)
+  fileCount  Int      @default(0)
+  totalBytes Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}
+
+// ============================================================
+// EXECUTIONS (Execution Engine — registro real de comandos)
+// ============================================================
+
+model Execution {
+  id          String    @id @default(cuid())
+  projectId   String
+  userId      String?
+  runId       String?   // AgentRun quando disparado por agente/Poskli
+  source      String    @default("terminal") // terminal | poskli | pipeline
+  trigger     String?   // "user:<name>" | agent:<id> | "system"
+  command     String
+  cwd         String    @default("workspace:/")
+  status      String    @default("QUEUED") // QUEUED|RUNNING|SUCCESS|FAILED|CANCELLED|TIMEOUT
+  stdout      String?
+  stderr      String?
+  exitCode    Int?
+  timedOut    Boolean   @default(false)
+  durationMs  Int?
+  syncedFiles Int       @default(0) // arquivos sincronizados disco→DB após execução
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([projectId, startedAt])
+}
+
+// ============================================================
+// POSKLI RUNS (orquestrador de agentes — sessões de execução)
+// ============================================================
+
+model PoskliRun {
+  id            String    @id @default(cuid())
+  projectId     String
+  userId        String
+  request       String
+  state         String    @default("ANALYZING") // ANALYZING|PLANNING|IMPLEMENTING|TESTING|REVIEWING|CORRECTING|VERIFYING|COMPLETED|FAILED|CANCELLED
+  iteration     Int       @default(0)
+  maxIterations Int       @default(3)
+  stages        Json      // timeline: [{stage,state,startedAt,finishedAt,durationMs,summary,tokensIn,tokensOut}]
+  plan          Json?
+  lastExecId    String?
+  testsPassed   Boolean   @default(false)
+  previewOk     Boolean   @default(false)
+  tokensIn      Int       @default(0)
+  tokensOut     Int       @default(0)
+  error         String?
+  result        String?
+  cancelToken   String    @default(cuid()) // flag de cancelamento cooperativo
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  @@index([projectId, startedAt])
+}
+
+// ============================================================
 // MODEL USAGE (uso agregado por modelo — economia de tokens)
 // ============================================================
 

@@ -1,16 +1,17 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
-import { safeResolve } from '@/lib/studio/security/path'
 import { STUDIO_CONFIG } from '@/lib/studio/config'
-import fs from 'fs/promises'
-import path from 'path'
+import { workspaceProvider } from '@/lib/studio/workspace/db-provider'
 
 export const dynamic = 'force-dynamic'
 
 /**
  * GET /api/files?project=<id>&path=<rel>  — lê arquivo (painel EDITOR)
  * POST /api/files { project, path, content } — grava arquivo (editor manual)
+ *
+ * PERSISTENTE: lê/grava no DATABASE (fonte da verdade) — sobrevive a
+ * instâncias serverless efêmeras. O disco é só materialização de execução.
  */
 export async function GET(req: Request) {
   const user = await getSessionUser(req)
@@ -22,22 +23,19 @@ export async function GET(req: Request) {
 
   const project = await db.project.findFirst({ where: { id: projectId, userId: user.id } })
   if (!project) return NextResponse.json({ error: 'PROJETO_NÃO_ENCONTRADO' }, { status: 404 })
+  if (!filePath) return NextResponse.json({ error: 'PATH_OBRIGATÓRIO' }, { status: 400 })
 
   try {
-    const abs = safeResolve(project.rootPath, filePath || '.')
-    const st = await fs.stat(abs)
-    if (st.isDirectory()) return NextResponse.json({ error: 'É diretório' }, { status: 400 })
-    if (st.size > STUDIO_CONFIG.files.maxFileReadBytes) {
-      return NextResponse.json({ error: 'ARQUIVO_GRANDE' }, { status: 413 })
+    const file = await workspaceProvider.readFile(projectId, filePath)
+    if (!file) return NextResponse.json({ error: 'ARQUIVO_NÃO_ENCONTRADO' }, { status: 404 })
+    if (file.encoding === 'base64') {
+      return NextResponse.json({ error: 'ARQUIVO_BINÁRIO (não editável como texto)' }, { status: 415 })
     }
-    const ext = path.extname(abs).toLowerCase()
-    if (STUDIO_CONFIG.files.blockedExtensions.includes(ext)) {
-      return NextResponse.json({ error: 'EXTENSÃO_BLOQUEADA' }, { status: 403 })
-    }
-    const content = await fs.readFile(abs, 'utf8')
-    return NextResponse.json({ path: filePath, content, size: st.size })
+    return NextResponse.json({ path: file.path, content: file.content, size: file.size })
   } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 404 })
+    const msg = (e as Error).message
+    const status = msg.includes('GRANDE') ? 413 : msg.includes('BLOCKED') ? 403 : 404
+    return NextResponse.json({ error: msg }, { status })
   }
 }
 
@@ -58,15 +56,12 @@ export async function POST(req: Request) {
   }
 
   try {
-    const abs = safeResolve(project.rootPath, filePath)
-    // valida extensão via reuso da validação de tools
-    const { validateFilePath } = await import('@/lib/studio/security/path')
-    validateFilePath(abs)
-    await fs.mkdir(path.dirname(abs), { recursive: true })
-    await fs.writeFile(abs, content, 'utf8')
+    const { bytes } = await workspaceProvider.writeFile(projectId, filePath, content)
     await db.project.update({ where: { id: projectId }, data: { updatedAt: new Date() } })
-    return NextResponse.json({ ok: true, path: filePath, bytes: Buffer.byteLength(content) })
+    return NextResponse.json({ ok: true, path: filePath, bytes })
   } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 400 })
+    const msg = (e as Error).message
+    const status = msg.includes('GRANDE') ? 413 : msg.includes('BLOCKED') ? 403 : 400
+    return NextResponse.json({ error: msg }, { status })
   }
 }

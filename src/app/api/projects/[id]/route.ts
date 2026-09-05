@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
-import { deleteWorkspace, workspaceTree, projectRoot } from '@/lib/studio/projects/workspace'
+import { deleteWorkspace } from '@/lib/studio/projects/workspace'
+import { workspaceProvider } from '@/lib/studio/workspace/db-provider'
 import { projectProgress } from '@/lib/studio/orchestrator/task-graph'
 import { readProjectMemory } from '@/lib/studio/context/context-manager'
 
@@ -20,7 +21,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!project) return NextResponse.json({ error: 'PROJETO_NÃO_ENCONTRADO' }, { status: 404 })
 
   const progress = await projectProgress(id)
-  const tree = await workspaceTree(projectRoot(id)).catch(() => [])
+  // Árvore PERSISTENTE (database — fonte da verdade)
+  const tree = await workspaceProvider.tree(id, { maxEntries: 500 }).catch(() => [])
   const memory = await readProjectMemory(id)
   const runs = await db.agentRun.findMany({
     where: { projectId: id },
@@ -61,7 +63,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   if (!user) return NextResponse.json({ error: 'NÃO_AUTENTICADO' }, { status: 401 })
   const { id } = await params
 
-  const project = await db.project.findFirst({ where: { id, userId: user.id } })
+  const project = await db.project.findFirst({ where: { id, userId: user.id }, include: { settings: true } })
   if (!project) return NextResponse.json({ error: 'PROJETO_NÃO_ENCONTRADO' }, { status: 404 })
 
   // Ação crítica: em modo MANUAL exige confirmação explícita no body
@@ -71,6 +73,10 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   }
 
   await deleteWorkspace(id).catch(() => {})
+  await db.workspaceFile.deleteMany({ where: { projectId: id } }).catch(() => {})
+  await db.workspaceSnapshot.deleteMany({ where: { projectId: id } }).catch(() => {})
+  await db.execution.deleteMany({ where: { projectId: id } }).catch(() => {})
+  await db.poskliRun.deleteMany({ where: { projectId: id } }).catch(() => {})
   await db.project.delete({ where: { id } }) // cascade: tasks, runs, tool_calls, settings
   return NextResponse.json({ ok: true })
 }

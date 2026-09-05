@@ -15,7 +15,18 @@ import {
   assertWorkspaceQuota,
   getWorkspaceSize,
 } from '../security/path'
+import { workspaceProvider } from '../workspace/db-provider'
 import type { ToolDefinition, ToolResult } from './types'
+
+/** Dual-write persistente: espelha a operação de disco no DB (fonte da verdade).
+ *  Falhas de persistência NÃO quebram a tool — o sync final do run reconcilia. */
+async function persistDb(op: () => Promise<unknown>): Promise<void> {
+  try {
+    await op()
+  } catch (e) {
+    console.warn('[workspace] persistência DB falhou (sync final reconciliará):', (e as Error).message)
+  }
+}
 
 const BLOCKED_DIR_NAMES = new Set(['node_modules', '.git', '.next', 'dist', '.cache', '__pycache__'])
 
@@ -84,26 +95,42 @@ export const readFileTool: ToolDefinition = {
   async execute(args, ctx): Promise<ToolResult> {
     const abs = safeResolve(ctx.workspaceRoot, String(args.path))
     const stat = await fs.stat(abs).catch(() => null)
-    if (!stat) return { ok: false, output: `ARQUIVO_NAO_ENCONTRADO: ${args.path}` }
-    if (stat.isDirectory()) return { ok: false, output: `É um diretório, não arquivo: ${args.path}` }
-    if (stat.size > STUDIO_CONFIG.files.maxFileReadBytes) {
+    if (stat && !stat.isDirectory() && stat.size <= STUDIO_CONFIG.files.maxFileReadBytes) {
+      const ext = path.extname(abs).toLowerCase()
+      if (!(STUDIO_CONFIG.files.blockedExtensions as readonly string[]).includes(ext)) {
+        const content = await fs.readFile(abs, 'utf8')
+        return {
+          ok: true,
+          output: content.length > STUDIO_CONFIG.context.maxFileCharsInContext
+            ? content.slice(0, STUDIO_CONFIG.context.maxFileCharsInContext) + '\n...[TRUNCADO]'
+            : content,
+          data: { path: rel(ctx.workspaceRoot, abs), size: stat.size },
+        }
+      }
+    }
+    // FALLBACK: disco sem o arquivo (instância fria) → lê do DB persistido
+    const dbFile = await workspaceProvider.readFile(ctx.projectId, String(args.path)).catch(() => null)
+    if (dbFile && dbFile.encoding === 'utf8') {
+      return {
+        ok: true,
+        output: dbFile.content.length > STUDIO_CONFIG.context.maxFileCharsInContext
+          ? dbFile.content.slice(0, STUDIO_CONFIG.context.maxFileCharsInContext) + '\n...[TRUNCADO]'
+          : dbFile.content,
+        data: { path: dbFile.path, size: dbFile.size, fromDb: true },
+      }
+    }
+    if (stat?.isDirectory()) return { ok: false, output: `É um diretório, não arquivo: ${args.path}` }
+    if (stat && stat.size > STUDIO_CONFIG.files.maxFileReadBytes) {
       return {
         ok: false,
         output: `ARQUIVO_GRANDE: ${stat.size}B excede limite de leitura (${STUDIO_CONFIG.files.maxFileReadBytes}B). Leia em partes via search_code.`,
       }
     }
     const ext = path.extname(abs).toLowerCase()
-    if (STUDIO_CONFIG.files.blockedExtensions.includes(ext)) {
+    if ((STUDIO_CONFIG.files.blockedExtensions as readonly string[]).includes(ext)) {
       return { ok: false, output: `EXTENSÃO_BLOQUEADA: ${ext}` }
     }
-    const content = await fs.readFile(abs, 'utf8')
-    return {
-      ok: true,
-      output: content.length > STUDIO_CONFIG.context.maxFileCharsInContext
-        ? content.slice(0, STUDIO_CONFIG.context.maxFileCharsInContext) + '\n...[TRUNCADO]'
-        : content,
-      data: { path: rel(ctx.workspaceRoot, abs), size: stat.size },
-    }
+    return { ok: false, output: `ARQUIVO_NAO_ENCONTRADO: ${args.path}` }
   },
 }
 
@@ -145,7 +172,7 @@ export const searchCodeTool: ToolDefinition = {
           continue
         }
         const ext = path.extname(e.name).toLowerCase()
-        if (STUDIO_CONFIG.files.blockedExtensions.includes(ext)) continue
+        if ((STUDIO_CONFIG.files.blockedExtensions as readonly string[]).includes(ext)) continue
         const st = await fs.stat(full).catch(() => null)
         if (!st || st.size > STUDIO_CONFIG.files.maxFileReadBytes) continue
         filesScanned++
@@ -186,6 +213,7 @@ export const createFileTool: ToolDefinition = {
     await assertWorkspaceQuota(ctx.workspaceRoot, Buffer.byteLength(content))
     await fs.mkdir(path.dirname(abs), { recursive: true })
     await fs.writeFile(abs, content, 'utf8')
+    await persistDb(() => workspaceProvider.writeFile(ctx.projectId, relPath, content))
     await emitEvent({
       type: 'tool.completed',
       projectId: ctx.projectId,
@@ -221,21 +249,31 @@ export const modifyFileTool: ToolDefinition = {
     if (!stat || stat.isDirectory()) return { ok: false, output: `ARQUIVO_NAO_ENCONTRADO: ${relPath}` }
 
     if (args.searchText !== undefined && args.replaceText !== undefined) {
-      const content = await fs.readFile(abs, 'utf8')
+      let content = await fs.readFile(abs, 'utf8').catch(() => null)
+      if (content === null) {
+        // disco frio → lê do DB persistido
+        const dbFile = await workspaceProvider.readFile(ctx.projectId, relPath).catch(() => null)
+        content = dbFile?.encoding === 'utf8' ? dbFile.content : null
+      }
+      if (content === null) return { ok: false, output: `ARQUIVO_NAO_ENCONTRADO: ${relPath}` }
       const search = String(args.searchText)
       if (!content.includes(search)) {
         return { ok: false, output: `TRECHO_NAO_ENCONTRADO em ${relPath}: ${search.slice(0, 120)}` }
       }
       const updated = content.replace(search, String(args.replaceText))
       validateFileSize(updated, relPath)
+      await fs.mkdir(path.dirname(abs), { recursive: true })
       await fs.writeFile(abs, updated, 'utf8')
+      await persistDb(() => workspaceProvider.writeFile(ctx.projectId, relPath, updated))
       return { ok: true, output: `ARQUIVO_MODIFICADO: ${relPath} (substituição aplicada)` }
     }
 
     if (args.content !== undefined) {
       const content = String(args.content)
       validateFileSize(content, relPath)
+      await fs.mkdir(path.dirname(abs), { recursive: true })
       await fs.writeFile(abs, content, 'utf8')
+      await persistDb(() => workspaceProvider.writeFile(ctx.projectId, relPath, content))
       return { ok: true, output: `ARQUIVO_REESCRITO: ${relPath} (${content.length} chars)` }
     }
 
@@ -255,7 +293,8 @@ export const deleteFileTool: ToolDefinition = {
     const stat = await fs.stat(abs).catch(() => null)
     if (!stat) return { ok: false, output: `ARQUIVO_NAO_ENCONTRADO: ${relPath}` }
     if (stat.isDirectory()) return { ok: false, output: 'Use apenas para arquivos, não diretórios' }
-    await fs.unlink(abs)
+    await fs.unlink(abs).catch(() => {})
+    await persistDb(() => workspaceProvider.deleteEntry(ctx.projectId, relPath))
     await emitEvent({
       type: 'tool.completed',
       projectId: ctx.projectId,
@@ -279,6 +318,7 @@ export const createDirectoryTool: ToolDefinition = {
   async execute(args, ctx): Promise<ToolResult> {
     const abs = safeResolve(ctx.workspaceRoot, String(args.path))
     await fs.mkdir(abs, { recursive: true })
+    await persistDb(() => workspaceProvider.createDir(ctx.projectId, String(args.path)))
     return { ok: true, output: `DIRETÓRIO_CRIADO: ${args.path}` }
   },
 }

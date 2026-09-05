@@ -8,21 +8,22 @@ import { STUDIO_CONFIG } from '../config'
 
 /** Comandos permitidos e seus argumentos permitidos (prefixos). */
 const COMMAND_ALLOWLIST: Record<string, string[]> = {
-  node: ['--version', '--test', '-e', 'scripts/', 'src/'],
-  npm: ['install', 'run', 'test', '--version', 'init', 'ci', 'ls', 'run', 'start', 'build'],
-  npx: ['--yes', 'create-', 'http-server'],
-  bun: ['install', 'run', 'test', '--version', 'x'],
+  node: ['--version', '--test', '-e', '--experimental-vm-modules', '--reporter'],
+  npm: ['install', 'run', 'test', '--version', 'init', 'ci', 'ls', 'start', 'build', 'exec', 'publish'],
+  npx: ['--yes', 'create-', 'http-server', 'vitest', 'tsc', 'typescript', 'jest', 'serve'],
+  bun: ['install', 'run', 'test', '--version', 'x', 'add'],
   git: ['status', 'diff', 'log', 'add', 'commit', 'branch', 'checkout', 'init', 'config', 'push', 'pull', 'merge', 'stash', 'show', 'rev-parse', '--version', 'worktree'],
-  python3: ['--version', '-c', '-m', 'scripts/'],
-  ls: ['-la', '-a', 'src', '.'],
+  python3: ['--version', '-c', '-m'],
+  ls: ['-la', '-a', '-l'],
   cat: [],
   echo: [],
   mkdir: ['-p'],
   pwd: [],
   wc: [],
-  find: ['.', '-name', '-type'],
-  grep: ['-r', '-i', '--include'],
-  rg: ['--files', '-n', '-i'],
+  find: ['.', '-name', '-type', '-maxdepth'],
+  grep: ['-r', '-i', '--include', '-n', '-E'],
+  rg: ['--files', '-n', '-i', '-g'],
+  rm: ['-rf', '-r', '-f', 'node_modules', 'dist', '.next', '.cache', 'coverage', 'tmp'],
 }
 
 /** Comandos explicitamente proibidos mesmo que prefixados. */
@@ -32,7 +33,7 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
   /:\(\)\{.*\};:/,              // fork bomb
   /curl.*\|\s*(ba)?sh/,         // pipe para shell
   /wget.*\|\s*(ba)?sh/,
-  />\/dev\/sd/,                 // escrita em dispositivo
+  /\/dev\/sd/,                  // escrita em dispositivo
   /chmod\s+777\s+\//,           // chmod recursivo na raiz
   /shutdown|reboot|halt/,
   /sudo/,
@@ -40,7 +41,22 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
   /ssh-keygen/,
   /--no-sandbox/,
   /eval\s*["']/,
+  /\/etc\/|\/root\/|\/proc\/|\/sys\//, // caminhos de sistema
+  /169\.254\.169\.254/,         // metadata endpoint (SSRF)
 ]
+
+/**
+ * Argumento posicional SEGURO: caminho relativo dentro do workspace,
+ * sem '..' (traversal), sem caminho absoluto, charset controlado.
+ * Metacaracteres de shell já são bloqueados globalmente.
+ */
+function isSafePositional(arg: string): boolean {
+  if (!arg || arg.startsWith('-')) return false
+  if (arg.startsWith('/') || arg.includes('..') || arg.includes('\0')) return false
+  // caminho/identificador/pacote/mensagem relativo (aspas literais são
+  // inofensivas: NUNCA usamos shell — spawn direto sem interpretação)
+  return /^[\w."'][\w./@:=+ "'-]*$/.test(arg) && arg.length <= 300
+}
 
 export interface CommandCheck {
   allowed: boolean
@@ -81,7 +97,11 @@ export function checkCommand(commandLine: string): CommandCheck {
     }
     const known = allowedArgs.some((prefix) => arg === prefix || arg.startsWith(prefix))
     const generic = arg.startsWith('-') && arg.length <= 40 && /^-{1,3}[a-zA-Z0-9-]+$/.test(arg)
-    if (!known && !generic) {
+    // caminhos relativos do workspace como argumento posicional
+    const positional = isSafePositional(arg)
+    // rm só aceita alvos gerados (nunca código-fonte do usuário)
+    const rmSafe = cmd !== 'rm' || /^[\w-]+$/.test(arg) && ['node_modules', 'dist', '.next', '.cache', 'coverage', 'tmp'].includes(arg)
+    if (!known && !generic && !(positional && rmSafe)) {
       return {
         allowed: false,
         reason: `argumento "${arg}" não permitido para "${cmd}"`,
