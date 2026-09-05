@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels'
 import { useStudio } from '@/hooks/use-studio'
+import { useIsMobile } from '@/hooks/use-mobile'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useIde } from './ide/use-ide'
@@ -34,6 +35,7 @@ type RightPanel = 'preview' | 'poskli'
 
 export function WorkspaceView({ onBack }: { onBack: () => void }): React.ReactElement {
   const { api, activeProjectId, liveEvents } = useStudio()
+  const isMobile = useIsMobile() // UM layout por vez (sem montagem duplicada de Monaco/Explorer)
   const [project, setProject] = useState<{ id: string; name: string; status: string; type: string } | null>(null)
   const [mobileTab, setMobileTab] = useState<MobileTab>('editor')
   const [rightPanel, setRightPanel] = useState<RightPanel>('preview')
@@ -124,7 +126,7 @@ export function WorkspaceView({ onBack }: { onBack: () => void }): React.ReactEl
 
   // ===== MOBILE: sub-abas =====
   const mobileNav = (
-    <div className="md:hidden sticky top-12 z-30 flex border-b border-zinc-800/60 bg-zinc-950/95 backdrop-blur">
+    <div className="sticky top-12 z-30 flex border-b border-zinc-800/60 bg-zinc-950/95 backdrop-blur">
       {mobileTabs.map((t) => (
         <button
           key={t.id}
@@ -140,12 +142,11 @@ export function WorkspaceView({ onBack }: { onBack: () => void }): React.ReactEl
     </div>
   )
 
-  return (
-    <div className="flex flex-col h-[calc(100dvh-3rem)] md:h-screen overflow-hidden">
-      {header}
-
-      {/* ===== MOBILE ===== */}
-      <div className="md:hidden flex-1 flex flex-col min-h-0">
+  // UM layout por vez: mobile OU desktop (nunca ambos no DOM)
+  if (isMobile) {
+    return (
+      <div className="flex flex-col h-[calc(100dvh-3rem)] overflow-hidden">
+        {header}
         {mobileNav}
         <div className="flex-1 min-h-0">
           {mobileTab === 'editor' && <IdePanel projectId={activeProjectId} />}
@@ -156,9 +157,14 @@ export function WorkspaceView({ onBack }: { onBack: () => void }): React.ReactEl
           {mobileTab === 'poskli' && <PoskliPanel projectId={activeProjectId} prefill={poskliPrefill} />}
         </div>
       </div>
+    )
+  }
 
-      {/* ===== DESKTOP: COMMAND CENTER ===== */}
-      <div className="hidden md:flex flex-1 min-h-0">
+  // ===== DESKTOP: COMMAND CENTER =====
+  return (
+    <div className="flex flex-col h-screen overflow-hidden">
+      {header}
+      <div className="flex-1 min-h-0">
         <PanelGroup direction="horizontal" autoSaveId="studio-workspace">
           {/* coluna central: editor + terminal */}
           <Panel defaultSize={rightOpen ? 62 : 100} minSize={40}>

@@ -105,7 +105,9 @@ export function MonacoCodeEditor(): React.ReactElement {
 
   const activeTab = tabs.find((t) => t.path === activePath)
 
-  // ---- cria o editor UMA vez ----
+  // ---- cria o editor UMA vez (container SEMPRE renderizado — bugfix:
+  //      antes o container só existia com arquivo aberto e o Monaco nunca
+  //      era criado; estados vazios agora são OVERLAYS) ----
   useEffect(() => {
     if (!containerRef.current || editorRef.current) return
     let cancelled = false
@@ -206,23 +208,27 @@ export function MonacoCodeEditor(): React.ReactElement {
     return () => setRevealFn(null)
   }, [setRevealFn])
 
-  if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center bg-zinc-950">
-        <span className="text-xs text-zinc-600">carregando arquivo…</span>
-      </div>
-    )
-  }
-
-  if (!activeTab) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-2 bg-zinc-950 text-center p-6">
-        <span className="text-3xl opacity-20 font-mono">{'</>'}</span>
-        <p className="text-sm text-zinc-500">Abra um arquivo no Explorer</p>
-        <p className="text-[11px] text-zinc-600">Ctrl+S salva · Ctrl+P busca arquivos</p>
-      </div>
-    )
-  }
-
-  return <div ref={containerRef} className="h-full w-full" aria-label={`editor: ${activeTab.path}`} />
+  // ---- render: container SEMPRE no DOM; estados são overlays ----
+  return (
+    <div className="h-full w-full relative">
+      <div
+        ref={containerRef}
+        className="h-full w-full"
+        style={{ display: activeTab ? 'block' : 'none' }}
+        aria-label="monaco-editor"
+      />
+      {loading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-zinc-950">
+          <span className="text-xs text-zinc-600">carregando arquivo…</span>
+        </div>
+      )}
+      {!loading && !activeTab && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-zinc-950 text-center">
+          <span className="text-3xl opacity-20 font-mono">{'</>'}</span>
+          <p className="text-sm text-zinc-500">Abra um arquivo no Explorer</p>
+          <p className="text-[11px] text-zinc-600">Ctrl+S salva · Ctrl+P busca arquivos</p>
+        </div>
+      )}
+    </div>
+  )
 }
