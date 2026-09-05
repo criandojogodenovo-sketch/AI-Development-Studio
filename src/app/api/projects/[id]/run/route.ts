@@ -6,7 +6,7 @@ import { runPipeline } from '@/lib/studio/orchestrator/pipeline'
 import { emitEvent } from '@/lib/studio/events/bus'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 900
+export const maxDuration = 300
 
 /**
  * POST /api/projects/:id/run — inicia o ENGINEERING PERFECTION LOOP.
