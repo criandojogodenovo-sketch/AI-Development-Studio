@@ -281,3 +281,25 @@ Stage Summary:
 - A correção Task 12 (standalone/cp) funcionou na Vercel e não era o bloqueio; sharp/prisma/tamanhos irrelevantes
 - Correção mínima recomendada (NÃO aplicada, aguarda aprovação): 1 linha — maxDuration 900 → 300 em run/route.ts
 - Confiança: ALTA (erro exato + código + config do adapter + 4/4 deployments consistentes)
+
+---
+Task ID: 15
+Agent: main (Super Z — LEAD ENGINEER)
+Task: APLICAR CORREÇÃO maxDuration 900→300 + commit + push + verificação do deploy na Vercel
+
+Work Log (EDITAR → VALIDAR → COMMITAR → PUSHEAR → VERIFICAR DEPLOY):
+- ÚNICA mudança aplicada: src/app/api/projects/[id]/run/route.ts linha 9 — maxDuration 900→300 (git diff confirmou 1 linha, 1 arquivo)
+- Production build (npm run build): EXIT 0; vercel build (adapter, cópia isolada): output confirma run.func maxDuration=300 (terminal=300) — ambos dentro do intervalo hobby 1–300
+- COMMIT 9218216 "fix: respect Vercel Hobby maxDuration limit" — exatamente 1 arquivo (route.ts +1/-1); PUSH bf2bd03..9218216 main→main confirmado por ls-remote + API GitHub (remote main = 9218216, 1 arquivo modificado)
+- Nota de transparência: o push incluiu 2 auto-commits do harness do ambiente (e052d43, 9c16b6b — ambos APENAS worklog.md, sem código)
+- DEPLOY AUTOMÁTICO via integração GitHub: dpl_5W8ksBFkj1bJbYpi2GeKKKf2ra2K (commit 9218216, production) — BUILDING → **READY em ~30s** — INVALID_MAX_DURATION RESOLVIDO (errorCode vazio, errorMessage vazio)
+- URLs: deployment ai-development-studio-8j1v3nmwk-mad-ae04.vercel.app; aliases: ai-development-studio-gamma.vercel.app (200 público), ai-development-studio-mad-ae04 e git-main (302 → SSO do Vercel Deployment Protection nos subdomínios do time — configuração do projeto, não erro)
+- Runtime verificado: SPA serve HTML (HTTP 200 em gamma); rotas /api retornam 500 — CAUSA EXATA nos logs de runtime (vercel logs): env-validator da Task 11 fazendo fail-fast em produção: "❌ DATABASE_URL: contém channel_binding=require — parâmetro libpq não suportado pelo engine do Prisma" → a DATABASE_URL configurada NO DASHBOARD da Vercel contém channel_binding=require (o validador funcionou exatamente como projetado)
+- Estado do boot (log): database protocol postgresql OK; BAI key1+key2 CONFIGURADAS (provider=bai); GITHUB_TOKEN não configurado; ENABLE_DEEPSEEK=false; EXECUTION_PROVIDER/GLM_MODEL/QWEN_MODEL/HY3_MODEL/DEEPSEEK_MODEL vazios → defaults do config.ts
+- Valores de env não legíveis via API (decrypt vazio p/ este token) nem via vercel pull ([SENSITIVE]) — segurança preservada; reportados os fatos do boot log
+- build-copy (.zscripts, gitignored) REMOVIDO após uso (higiene — continha .vercel/ linkado)
+- git status final: limpo; nada além do aprovado foi alterado; zero mudanças em Vercel config
+
+Stage Summary:
+- DEPLOYMENT PROBLEMA RESOLVIDO: production deployment READY (invalid_max_duration eliminado)
+- PRÓXIMO BLOQUEIO (runtime, NÃO de deploy): DATABASE_URL na Vercel contém channel_binding=require → corrigir no dashboard (mesma URL sem o parâmetro) e redeploy — aguardando aprovação do usuário; env-validator provou seu valor em produção
