@@ -258,7 +258,7 @@ async function doRunExecution(opts: RunExecutionOptions): Promise<RunExecutionRe
   await emitEvent({
     type: 'tool.completed',
     projectId,
-    runId: opts.runId ?? null,
+    runId: opts.runId ?? undefined,
     tool: 'execution',
     agent: opts.trigger ?? 'terminal',
     action: command.slice(0, 120),

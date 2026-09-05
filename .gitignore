@@ -66,3 +66,4 @@ db/*.db-journal
 
 # scripts auxiliares do sandbox (ferramentas de patch one-off)
 scripts/patch-json-parser.cjs
+monaco/vs

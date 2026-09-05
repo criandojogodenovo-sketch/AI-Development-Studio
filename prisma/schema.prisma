@@ -55,6 +55,8 @@ model Project {
   status      String @default("CREATED")
   rootPath    String // caminho absoluto do workspace
   gitBranch   String      @default("main")
+  // Repositório GitHub conectado ("owner/name"); null = não conectado
+  gitRepo     String?
   // Memória estruturada do projeto: arquitetura, stack, decisões, convenções,
   // dependências, problemas conhecidos, decisões dos agentes, tarefas concluídas
   memory      Json       

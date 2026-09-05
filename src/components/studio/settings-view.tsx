@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useStudio } from '@/hooks/use-studio'
 import { AGENT_ICONS, agentLabel } from './ui-helpers'
+import { AgentIcon } from './ui-helpers'
 import { LogOut, Shield, KeyRound, Github, Server, Lock } from 'lucide-react'
 
 export function SettingsView() {
@@ -52,7 +53,7 @@ export function SettingsView() {
         <CardContent className="space-y-2">
           {(agents?.agents ?? []).map((a: any) => (
             <div key={a.id} className="flex items-center gap-2 text-xs border-b border-zinc-800/50 pb-1.5">
-              <span className="shrink-0">{AGENT_ICONS[a.id] ?? '🤖'}</span>
+              <AgentIcon id={a.id} className="w-4 h-4 shrink-0 text-emerald-400" />
               <span className="text-zinc-300 w-40 truncate shrink-0">{agentLabel(a.id)}</span>
               <Badge variant="outline" className={`scale-90 shrink-0 ${a.enabled ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-zinc-500/15 text-zinc-500 border-zinc-500/30'}`}>
                 {a.enabled ? 'ATIVO' : 'EM BREVE'}

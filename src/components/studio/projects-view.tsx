@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStudio } from '@/hooks/use-studio'
 import { statusColor, statusLabel, timeAgo, TEMPLATE_ICONS } from './ui-helpers'
+import { Package } from 'lucide-react'
 import { Loader2, Plus, Trash2, Play, FolderOpen } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -90,7 +91,7 @@ export function ProjectsView({ onOpenProject, presetRequest }: {
               <div className="flex items-start justify-between gap-2">
                 <button onClick={() => onOpenProject(p.id)} className="text-left min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-lg">{TEMPLATE_ICONS[p.type] ?? '📦'}</span>
+                    {(() => { const TIcon = TEMPLATE_ICONS[p.type] ?? Package; return <TIcon className="w-5 h-5 text-emerald-400" /> })()}
                     <span className="font-semibold truncate">{p.name}</span>
                   </div>
                   <p className="text-xs text-zinc-500 truncate mt-0.5">{p.description || p.type}</p>
@@ -140,7 +141,7 @@ export function ProjectsView({ onOpenProject, presetRequest }: {
                 <SelectContent className="bg-zinc-900 border-zinc-800">
                   {templates.map((t) => (
                     <SelectItem key={t.type} value={t.type}>
-                      {TEMPLATE_ICONS[t.type]} {t.label}
+                      {(() => { const TIcon = TEMPLATE_ICONS[t.type] ?? Package; return <TIcon className="w-3.5 h-3.5 inline mr-1" /> })()} {t.label}
                     </SelectItem>
                   ))}
                 </SelectContent>

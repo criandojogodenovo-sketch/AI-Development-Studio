@@ -86,7 +86,7 @@ function injectConsole(html: string): string {
 
 export async function GET(
   req: Request,
-  { params }: { params: Promise<{ projectId: string; path: string[] }> }
+  { params }: { params: Promise<{ projectId: string; path?: string[] }> }
 ) {
   const user = await getSessionUser(req)
   if (!user) return NextResponse.json({ error: 'NÃO_AUTENTICADO' }, { status: 401 })

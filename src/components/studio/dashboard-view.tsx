@@ -4,7 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { useStudio } from '@/hooks/use-studio'
-import { statusColor, statusLabel, eventIcon, timeAgo } from './ui-helpers'
+import { statusColor, statusLabel, timeAgo } from './ui-helpers'
+import { EventIcon } from './ui-helpers'
 import { Button } from '@/components/ui/button'
 import { FolderKanban, Zap, Coins, Activity, ArrowRight, Gamepad2 } from 'lucide-react'
 
@@ -129,7 +130,7 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
             {feed.length === 0 && <p className="text-sm text-zinc-500">Sem eventos ainda — inicie um pipeline.</p>}
             {feed.map((e, i) => (
               <div key={e.id ?? i} className="flex items-start gap-2 text-xs border-b border-zinc-800/50 pb-1.5">
-                <span>{eventIcon(e.type)}</span>
+                <EventIcon type={e.type} />
                 <div className="flex-1 min-w-0">
                   <p className="text-zinc-300 break-words">{e.message}</p>
                   <p className="text-zinc-500 text-[10px]">{e.createdAt ? timeAgo(e.createdAt) : 'agora'}</p>

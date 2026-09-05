@@ -19,7 +19,9 @@ export interface PlannedTask {
   dependsOn: number[] // índices 0-based
 }
 
-/** Cria tarefas do plano no banco (grafo). */
+/** Cria tarefas do plano no banco (grafo).
+ *  dependsOn vem com ÍNDICES (0-based) do plano — são convertidos
+ *  para IDs reais das tarefas criadas (readyTasks compara com IDs). */
 export async function createTasksFromPlan(
   projectId: string,
   plan: { tasks: PlannedTask[] }
@@ -28,10 +30,9 @@ export async function createTasksFromPlan(
   const validRoles = new Set(['coding', 'testing', 'review', 'github'])
   const validPriorities = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
 
-  for (const t of plan.tasks.slice(0, 20)) {
-    const dependsOn = Array.isArray(t.dependsOn)
-      ? t.dependsOn.filter((i) => Number.isInteger(i) && i >= 0 && i < plan.tasks.length)
-      : []
+  const planTasks = plan.tasks.slice(0, 20)
+  // 1) cria todas as tarefas (dependencies vazias por ora)
+  for (const t of planTasks) {
     const task = await db.task.create({
       data: {
         projectId,
@@ -41,12 +42,24 @@ export async function createTasksFromPlan(
         status: 'PENDING',
         priority: validPriorities.has(t.priority) ? t.priority : 'MEDIUM',
         agentRole: validRoles.has(t.agentRole) ? t.agentRole : 'coding',
-        dependencies: dependsOn as unknown as object,
+        dependencies: [] as unknown as object,
         input: {} as object,
         result: {} as object,
       },
     })
     ids.push(task.id)
+  }
+  // 2) resolve dependsOn (índices → IDs reais)
+  for (let i = 0; i < planTasks.length; i++) {
+    const raw = planTasks[i].dependsOn
+    const dependsOn = Array.isArray(raw)
+      ? raw
+          .map((idx) => (Number.isInteger(idx) && idx >= 0 && idx < ids.length ? ids[Number(idx)] : null))
+          .filter((x): x is string => Boolean(x) && x !== ids[i])
+      : []
+    if (dependsOn.length > 0) {
+      await db.task.update({ where: { id: ids[i] }, data: { dependencies: dependsOn as unknown as object } })
+    }
   }
   return ids
 }

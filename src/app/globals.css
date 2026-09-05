@@ -120,3 +120,24 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ===== STUDIO FASE 2 — animações e scrollbar do IDE ===== */
+@keyframes slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+.slide-in-left {
+  animation: slide-in-left 0.22s ease-out;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* terminal/pre com seleção visível */
+pre::selection, .studio-terminal ::selection {
+  background: rgba(16, 185, 129, 0.35);
+}
