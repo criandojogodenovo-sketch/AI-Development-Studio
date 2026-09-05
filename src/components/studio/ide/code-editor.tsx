@@ -14,14 +14,14 @@ import { useIde } from './use-ide'
 // carrega Monaco dos assets locais (antes do primeiro mount)
 loader.config({ paths: { vs: '/monaco/vs' } })
 
-// Workers do Monaco PRECISAM de URL absoluta (worker não resolve relativo)
+// Workers do Monaco PRECISAM de URL absoluta (worker não resolve relativo).
+// Blob URL herda a ORIGEM da página → importScripts do workerMain funciona.
 if (typeof window !== 'undefined' && !(window as { MonacoEnvironment?: unknown }).MonacoEnvironment) {
   ;(window as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
     getWorkerUrl: () => {
       const baseUrl = `${window.location.origin}/monaco/vs/`
-      return `data:text/javascript;charset=utf-8,${encodeURIComponent(
-        `self.MonacoEnvironment={baseUrl:'${baseUrl}'};importScripts('${baseUrl}base/worker/workerMain.js');`
-      )}`
+      const code = `self.MonacoEnvironment={baseUrl:'${baseUrl}'};importScripts('${baseUrl}base/worker/workerMain.js');`
+      return URL.createObjectURL(new Blob([code], { type: 'application/javascript' }))
     },
   }
 }
