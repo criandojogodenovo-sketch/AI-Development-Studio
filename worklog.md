@@ -372,3 +372,39 @@ Stage Summary:
 - PIPELINE FUNCIONAL: after() + modelos roteando corretamente + ciclo perfeição real (implementa→revisa→corrige) + ferramentas executando
 - LIMITAÇÃO EXTERNA REMANESCENTE: B.AI rate limit 429 (conta do usuário) — tratado honestamente (cooldown 60s, tentativas, erro claro na tarefa); /tmp efêmero por instância lambda (arquivos da run podem não aparecer no listing de outra instância) — persistência de workspaces segue fora de escopo (sem credencial de storage)
 - git local = remoto = ab97b5f; secrets preservados (zero em código/commits/logs)
+
+---
+Task ID: F2
+Agent: main (Super Z — LEAD ENGINEER)
+Task: FASE 2 — POSKLI + WORKSPACE + IDE PROFISSIONAL (workspace persistente, Execution Engine, terminal real, Monaco, preview, Git/GitHub, Poskli 0.1, command center, produção)
+
+Work Log:
+- FASE A (auditoria): mapa completo CURRENT→TARGET; identificado /tmp efêmero como limite central; pipeline existente preservado (after() intacto)
+- C1 WORKSPACE PERSISTENTE: Prisma WorkspaceFile/Snapshot (Neon = fonte da verdade); WorkspaceProvider (abstração p/ troca de storage); sync.ts (materialização DB→disco incremental por marker + syncBack disco→DB + migração legada de projetos só-em-disco); dual-write nas tools dos agentes; /api/files, /api/projects/[id] e preview lendo do DB
+- C2 EXECUTION ENGINE: model Execution (QUEUED/RUNNING/SUCCESS/FAILED/CANCELLED/TIMEOUT); spawn SEM shell + allowlist ampliada com posicionais seguros (sem abs path, sem ..); timeout clamp 240s Vercel + SIGKILL; cap 200KB; masking de secrets (incl. comando persistido); fila por projeto; cancel por registry + abort do request; /api/executions POST SSE streaming + GET histórico + DELETE cancel; /api/terminal legado roteado pelo engine
+- C3 EDITOR: @monaco-editor/react + assets LOCAIS em public/monaco (nunca CDN); 7 temas; tabs dirty + breadcrumbs + Ctrl+S + minimap/wrap + reveal de linha; Explorer criar/renomear/remover/filtrar; /api/workspace/* (tree, file CRUD, dir, rename, search, snapshot + restore)
+- C4 TERMINAL: painel com tabs, streaming SSE em tempo real, histórico localStorage ↑↓, stop (SIGKILL), clear, restart, exit/duração/sync; Executions view com output expandível
+- C5 PREVIEW: viewports mobile/tablet/desktop, refresh, externo, console em tempo real (bridge postMessage), status READY/ERROR, página de erro acionável ([Abrir arquivo][Abrir terminal][Pedir correção ao Poskli])
+- C6 GIT REAL: isomorphic-git (pure JS — serverless); status/diff(jsdiff)/log/branch/checkout/commit + connect/push/pull/clone GitHub; .git persistido no DB (base64); token só backend e sanitizado; bugfix statusMatrix untracked=[0,2,0]
+- C7 POSKLI 0.1: orquestrador com estados visíveis (ANALYZING→PLANNING→IMPLEMENTING→TESTING→(CORRECTING→TESTING)*→REVIEWING→VERIFYING→COMPLETED/FAILED/CANCELLED); TESTES REAIS via Execution Engine; correção alimentada pela SAÍDA REAL dos testes; verificação testes+preview; snapshot pré-execução; cancel cooperativo; /api/poskli/run|detail|cancel|fix
+- C8 UI/UX: sidebar desktop + hamburger mobile (fim das bottom-tabs); seções Início/Projetos/Workspace/Execuções/Git/Modelos/Ajustes/Diagnóstico; command center com react-resizable-panels; Lucide 100% (zero emojis); Diagnostics técnica separada
+- BUGFIX CRÍTICO (pré-existente!): createTasksFromPlan guardava dependsOn como ÍNDICES enquanto readyTasks comparava com IDs → tarefas dependentes BLOCKED eternamente; convertido índices→IDs reais
+- PRODUÇÃO: prisma generate explícito no build (client stale no cache da Vercel); GITHUB_TOKEN configurado na Vercel (sensitive, prod+preview); socket.io não conecta em .vercel.app (produção = polling); workers Monaco via blob URL; preview com allow-same-origin (ES modules; cookie HttpOnly protege token)
+- INCIDENTE: GitHub secret scanning BLOQUEOU um push (script de teste continha token real) → substituído por fake pattern (proteção do GitHub funcionando)
+
+TESTES (evidência em .zscripts/ e scripts/):
+- smoke C1+C2: LOCAL 27/27 · PRODUÇÃO 27/27 (node v24.18.0 REAL na Vercel, SSE, negação, histórico, preview)
+- smoke C3..C8: LOCAL 32/32 · PRODUÇÃO 32/32 (workspace API, snapshots, monaco assets, git init/commit/diff/branch/checkout, diagnostics)
+- smoke POSKLI REAL: PRODUÇÃO 20/20 — ciclo COMPLETO (70.787 tokens BAI), npm test exit 0, implementação verificada (contarVidas), reproduzível manualmente
+- smoke segurança: 37/37 LOCAL (12 vetores injeção, 7 traversal, 7 cross-project, 6 superfícies secrets, rate limit)
+- PUSH REAL GitHub: local 16/17 + PRODUÇÃO 9/10 — commit verificado via API (arquivo+conteúdo), pull ok; 403 apenas na DELEÇÃO do repo de teste (scope do token, sem impacto)
+- BROWSER REAL (Playwright): desktop 26/27 + mobile 7/7 — Monaco montado (view-lines), terminal real v24.18.0 no browser, drawer, sub-abas; VLM confirmou command center renderizando; app console 0 erros
+- Runtime logs produção: ZERO erros/500s
+
+Commits (main, todos pushed): 68dce7d (C1+C2) · 7a63c73 (C3..C8) · d5ff690 (masking+security) · b820524 (prisma generate build) · f644b5c (monaco container+layout único) · ad81623 (socket.io Vercel) · bac50db (workers+preview sandbox) · c60efff (blob worker) — 8 commits, 8 deploys READY
+Deployments: dpl_tdeJpW1nbi…(d5ff690) · dpl_3Nz74aWxvb…(b820524) · dpl_A3PrhKkboW…(f644b5c) · dpl_95n12fLLBp…(ad81623) · dpl_J5ZgAEPAux…(bac50db) · dpl_BKcA8DbPq8…(c60efff) — produção https://ai-development-studio-gamma.vercel.app
+
+Stage Summary:
+- IDE FUNCIONAL EM PRODUÇÃO: workspace persistente (Neon), terminal real com streaming, Monaco completo, preview com console, Git/GitHub real (push verificado), Poskli 0.1 real (testes verdes via engine), command center desktop+mobile
+- LIMITAÇÕES HONESTAS DOCUMENTADAS: comandos vivem dentro de 1 invocação (máx 240s; builds longos exigiriam executor dedicado — interface DockerExecutionProvider/RemoteSandboxProvider pronta); rate limit in-memory é por instância lambda; preview roda código do próprio usuário com mesma origem (cookie HttpOnly protege o token); isolamento de execução é por processo (não contêiner — sem Docker na Vercel Hobby); sandbox LLM 429 afetou apenas testes locais (produção usa B.AI)
+- Repos de teste remanescentes (token sem scope delete_repo): studio-push-test-1788648016033 e studio-prod-push-1788648930674 (privados, deletáveis manualmente)
