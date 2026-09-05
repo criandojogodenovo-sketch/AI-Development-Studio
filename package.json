@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "bash scripts/copy-monaco.sh && next dev -p 3000 2>&1 | tee dev.log",
-    "build": "bash scripts/copy-monaco.sh && next build && if [ -z \"$VERCEL\" ] && [ -d .next/standalone ]; then cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/; fi",
+    "build": "bash scripts/copy-monaco.sh && prisma generate && next build && if [ -z \"$VERCEL\" ] && [ -d .next/standalone ]; then cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/; fi",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
     "db:push": "prisma db push --accept-data-loss",
