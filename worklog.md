@@ -232,3 +232,26 @@ Work Log:
 
 Stage Summary:
 - Configuração operacional entregue: auditoria completa + validação de ambiente no boot + .env.example honesto + testes 36/36 + E2E 14/14 + build OK + push confirmado
+
+---
+Task ID: 13
+Agent: main (Super Z — LEAD ENGINEER)
+Task: COMMIT + PUSH da correção mínima Vercel (fix da Task 12) — com RECUPERAÇÃO DE ESTADO (ambiente local revertido)
+
+Work Log (DETECTAR → RECUPERAR → RE-APLICAR → VALIDAR → COMMITAR → PUSHEAR):
+- ANOMALIA DETECTADA antes de commitar: git mostrava ~140 arquivos "modified" apenas de modo (100644→100755), remote origin com o typo do nome do repo (jogAdenovo), e o git diff dos 2 arquivos da correção mostrava SÓ mudança de modo — sem conteúdo
+- DIAGNÓSTICO REAL: o ambiente local foi revertido a um snapshot ANTERIOR à Task 10 — HEAD em a5424f0 (6 commits), artefatos da Task 11 AUSENTES (env-validator/instrumentation/test-env-validator), .env de volta ao SQLite antigo, correção da Task 12 desfeita localmente; porém o REMOTO GitHub permanecia íntegro no tip 6960304 (último push confirmado da Task 11)
+- MITIGAÇÕES REAPLICADAS (recorrentes do histórico): core.fileMode=false (ruído de permissões), remote corrigido programaticamente via python (owner='criando'+'jogo'+'denovo'+'-sketch' — typo nunca mais digitado manualmente), unset DATABASE_URL nos comandos que tocam build/dev
+- RECUPERAÇÃO: git fetch <token-url> main → FETCH_HEAD=6960304; git reset --hard FETCH_HEAD (working tree era idêntico ao snapshot antigo — nada local a preservar, verificado com status vazio pós-fileMode=false); upstream main→origin/main configurado; artefatos Task 11 restaurados e conferidos
+- CORREÇÃO RE-APLICADA byte-a-byte idêntica à Task 12 (mesmos hashes de blob: next.config.ts 0bd2f11..d6cc21a; package.json 133ea09..a476076): output condicional VERCEL + guard [ -z "$VERCEL" ] && [ -d .next/standalone ] nos cp
+- REVALIDAÇÃO dos builds: modo local (bun run build) EXIT 0 com server.js + cp static + cp public EXECUTADOS; modo Vercel (VERCEL=1, npm, .next limpo) EXIT 0 com standalone AUSENTE e .next=8.3 MB; build local final restaurado EXIT 0
+- .env local restaurado (gitignored) com os valores REAIS do usuário: DATABASE_URL Neon (sem channel_binding), GITHUB_TOKEN, ENABLE_DEEPSEEK=false, BAI keys vazias
+- COMMIT bf2bd03: exatamente 2 arquivos (next.config.ts +3/-1, package.json +1/-1), mensagem "fix(vercel): output standalone condicional + guard nos cp do build"; pai = 6960304 (histórico linear, sem forca)
+- PUSH EXECUTADO E CONFIRMADO por 3 fontes: (1) git push → 6960304..bf2bd03 main->main; (2) ls-remote → bf2bd03a54db53047afbe6108c5381c31d7a198f em refs/heads/main; (3) API GitHub → main remoto em bf2bd03 com exatamente 2 arquivos modificados
+- ZERO alterações além das aprovadas: sharp MANTIDO, Prisma/Neon/auth/providers/ModelRouter/DeepSeek/agentes/Postky intocados (conteúdo idêntico ao estado 6960304 já aprovado e testado)
+
+Stage Summary:
+- Novo SHA do main (local = remoto): bf2bd03a54db53047afbe6108c5381c31d7a198f
+- Correção mínima Vercel oficialmente no repo; próximo passo do usuário: disparar deploy de confirmação na Vercel (lembrar variáveis da Lista A — mínimo DATABASE_URL)
+- worklog Task 13 mantido LOCAL e não-commitado (instrução: commit apenas dos 2 arquivos)
+- Nota operacional: resets de ambiente podem reverter working tree/.env/config git — verificar git log + artefatos antes de qualquer operação sensível (checklist registrado aqui)
