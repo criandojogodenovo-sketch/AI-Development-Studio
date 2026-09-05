@@ -230,7 +230,7 @@ export class ModelRouter {
           requests: 1,
           promptTokens: result?.promptTokens ?? 0,
           completionTokens: result?.completionTokens ?? 0,
-          totalTokens: result?.promptTokens + result?.completionTokens ?? 0,
+          totalTokens: (result?.promptTokens ?? 0) + (result?.completionTokens ?? 0),
           errors: isError ? 1 : 0,
         },
         update: {

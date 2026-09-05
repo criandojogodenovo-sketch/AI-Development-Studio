@@ -89,9 +89,21 @@ export class BAIProvider implements LLMProvider {
         const content = choice?.message?.content ?? ''
         const finishReason = choice?.finish_reason
 
-        if (!content && finishReason !== 'length') {
+        // Alguns provedores retornam HTTP 200 com corpo de erro — não silenciar
+        if (json.error?.message) {
           throw Object.assign(
-            new Error('BAI_RESPOSTA_VAZIA: provedor retornou sem conteúdo'),
+            new Error(`BAI_ERRO_PROVEDOR_200: ${json.error.message.slice(0, 300)}`),
+            { httpStatus: 200 }
+          )
+        }
+
+        if (!content && finishReason !== 'length') {
+          // Diagnóstico seguro: estrutura do corpo (sem segredos) para identificar
+          // formatos inesperados/modelos inválidos nos logs de runtime
+          const bodyPreview = JSON.stringify(json).slice(0, 250)
+          console.warn(`[BAIProvider] resposta vazia para model=${req.model} http=200 corpo=${bodyPreview}`)
+          throw Object.assign(
+            new Error(`BAI_RESPOSTA_VAZIA: corpo=${bodyPreview}`),
             { httpStatus: 200 }
           )
         }
@@ -113,8 +125,12 @@ export class BAIProvider implements LLMProvider {
         }
         // rede (fetch failed, ECONNRESET, etc.) — sem status
         if (!e.httpStatus && /fetch failed|ECONN|network|socket/i.test(e.message ?? '')) {
-          throw Object.assign(new Error(`BAI_NETWORK: ${e.message}`), { network: true })
+          const netMsg = `BAI_NETWORK: ${e.message}`
+          console.warn(`[BAIProvider] falha de rede (key#${keyIndex}) model=${req.model}: ${String(e.cause ?? e.message).slice(0, 200)}`)
+          throw Object.assign(new Error(netMsg), { network: true })
         }
+        // erro do provedor (HTTP ou 200-com-erro) — visível nos logs de runtime
+        console.warn(`[BAIProvider] falha (key#${keyIndex}) model=${req.model}: ${e.message.slice(0, 250)}`)
         throw e
       }
     })
