@@ -373,6 +373,13 @@ export class AgentRunner {
           if (toolName === 'read_file' && typeof toolArgs.path === 'string') {
             this.readCache.set(toolArgs.path, this.steps.length + 1)
           }
+          // Arquivo modificado → invalida cache de leitura (conteúdo mudou)
+          if (ok && ['modify_file', 'create_file', 'delete_file'].includes(String(toolName)) && typeof toolArgs.path === 'string') {
+            this.readCache.delete(String(toolArgs.path))
+            // re-leitura futura deste arquivo é legítima (conteúdo novo)
+            const readKey = `read_file:${JSON.stringify({ path: toolArgs.path })}`.slice(0, 300)
+            this.actionCounts.delete(readKey)
+          }
         } catch (e) {
           observation = `TOOL_CRASH: ${(e as Error).message}`
           ok = false

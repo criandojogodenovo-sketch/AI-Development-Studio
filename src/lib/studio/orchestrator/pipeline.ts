@@ -330,13 +330,16 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
       })
     } else {
       // CREATE_FIX_TASK → volta para IMPLEMENT (nova tentativa)
+      // A descrição é RECONSTRUÍDA (não acumulada) — acumular correções
+      // antigas envenena o agente com searchText obsoletos
       const fixInstructions = buildFixInstructions(exec)
+      const baseDescription = extractBaseDescription(freshTask.description)
       await db.task.update({
         where: { id: freshTask.id },
         data: {
           status: 'PENDING',
           error: `Tentativa ${freshTask.attempts}: ${exec.status}`,
-          description: freshTask.description + `\n\n[CORREÇÃO NECESSÁRIA — tentativa ${freshTask.attempts + 1}]\n${fixInstructions}`.slice(0, 4000),
+          description: (baseDescription + `\n\n[CORREÇÃO — tentativa ${freshTask.attempts + 1}]\n${fixInstructions}`).slice(0, 4000),
         },
       })
       await emitEvent({
@@ -392,14 +395,23 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
 }
 
 function buildFixInstructions(exec: TaskExecution): string {
-  const parts = [`Status da tentativa anterior: ${exec.status}`]
-  parts.push(`Resultado/erro reportado:\n${exec.result.slice(0, 1500)}`)
+  const parts = [
+    'IMPORTANTE: PRIMEIRO execute read_file no arquivo que precisa corrigir — o conteúdo atual pode ser DIFERENTE do que você lembra (foi modificado em tentativas anteriores). Use o conteúdo REAL lido para montar searchText/replaceText EXATOS.',
+    `Status da tentativa anterior: ${exec.status}`,
+  ]
+  parts.push(`Resultado/erro reportado:\n${exec.result.slice(0, 1200)}`)
   if (exec.review?.issues?.length) {
-    parts.push(`Issues do Review Agent:\n${JSON.stringify(exec.review.issues.slice(0, 5), null, 1).slice(0, 1500)}`)
+    parts.push(`Issues do Review Agent:\n${JSON.stringify(exec.review.issues.slice(0, 4), null, 1).slice(0, 1200)}`)
     parts.push('Corrija CADA issue listada. Mude de estratégia se a anterior falhou.')
   }
   if (exec.status === 'REPEATED_FAILURE') {
-    parts.push('ATENÇÃO: foi detectada repetição da mesma estratégia falha. Aborde o problema de forma DIFERENTE (outra abordagem, outro arquivo, outra técnica).')
+    parts.push('ATENÇÃO: a mesma edição falhou repetidas vezes (trecho não encontrado). O arquivo MUDOU. Leia o arquivo atual e edite por trechos que EXISTEM no conteúdo lido, ou reescreva o arquivo via content completo.')
   }
   return parts.join('\n\n')
+}
+
+/** Extrai a descrição ORIGINAL da tarefa (remove blocos de correção acumulados). */
+function extractBaseDescription(description: string): string {
+  const idx = description.indexOf('\n\n[CORREÇÃO')
+  return idx === -1 ? description : description.slice(0, idx)
 }
