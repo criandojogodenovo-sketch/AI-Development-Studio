@@ -303,3 +303,25 @@ Work Log (EDITAR → VALIDAR → COMMITAR → PUSHEAR → VERIFICAR DEPLOY):
 Stage Summary:
 - DEPLOYMENT PROBLEMA RESOLVIDO: production deployment READY (invalid_max_duration eliminado)
 - PRÓXIMO BLOQUEIO (runtime, NÃO de deploy): DATABASE_URL na Vercel contém channel_binding=require → corrigir no dashboard (mesma URL sem o parâmetro) e redeploy — aguardando aprovação do usuário; env-validator provou seu valor em produção
+
+---
+Task ID: 16
+Agent: main (Super Z — LEAD ENGINEER)
+Task: CORRIGIR DATABASE_URL na Vercel (remover channel_binding) + redeploy + smoke tests reais
+
+Work Log (LOCALIZAR → CORRIGIR ENV → REDEPLOYAR → TESTAR → REPORTAR):
+- Valor atual da DATABASE_URL não legível via API (decrypt vazio p/ token — segurança); aplicada a conexão idêntica à validada localmente (mesma URL do usuário SEM channel_binding, 22/22 vs Neon na Task 10)
+- PATCH /v10/projects/prj_JlAHgua53UYdAnmDhaLykQSeg0CW/env/vgR7gtkHAWw6Z9tt → HTTP 200; target preservado (production+preview); updatedAt 1788633725469; valor NUNCA impresso
+- REDEPLOY via CLI (vercel redeploy): novo deployment dpl_MRxYVKCygDH9x6dFx9er6WE6QPRS (nmamu810q) → READY em 1m; alias gamma atualizado
+- BOOT LIMPO confirmado em runtime logs: "✅ Variáveis obrigatórias presentes e válidas" (env-validator passando); database postgresql ok; BAI key1+key2 true provider bai; ENABLE_DEEPSEEK false; warnings não bloqueantes
+- SMOKE TESTS REAIS (gamma): GET / 200 SPA ✅; /api/models sem sessão 401 controlado (500 ELIMINADO) ✅; register+login REAIS contra Neon 200 ✅ (Prisma+DATABASE_URL corrigida funcionando em produção!); senha errada 401 ✅; /api/models com sessão 200 (GLM-5.3-Flash master, overview) ✅
+- BLOQUEIO SEGUINTE (novo, sem código alterado): POST /api/projects → 500 {"error":"FALHA_CRIAÇÃO: ENOENT: no such file or directory, mkdir '25e08574efaab781'"}
+- CAUSA RAIZ (código, leitura): config.ts:60 workspacesRoot = process.env.WORKSPACES_ROOT ?? '/home/z/my-project/workspaces' — na Vercel a var está DEFINIDA MAS VAZIA (""), e ?? NÃO substitui string vazia → root='' → workspace.ts:16 path.join('', id)=id relativo → mkdir relativo → ENOENT no cwd da lambda
+- Validator não bloqueou: env-validator.ts:164 só valida WORKSPACES_ROOT preenchida (assumia default p/ vazia — edge case string vazia)
+- NENHUMA alteração adicional feita (conforme instrução: nada às cegas; erro exato reportado)
+- Chamada de modelo real (run) PENDENTE: exige projeto criado (bloqueado acima); ModelRouter ativo com provider BAI (boot) e /api/models 200
+
+Stage Summary:
+- DEPLOY 100% FUNCIONAL: boot validado, Neon conectando, auth real funcionando em produção
+- Correção recomendada (AGUARDANDO AUTORIZAÇÃO, sem código): definir WORKSPACES_ROOT=/tmp/workspaces no dashboard da Vercel (único FS gravável das Functions; caminho absoluto) + redeploy — ressalva honesta: /tmp é efêmero por instância lambda (persistência de workspaces é questão arquitetural futura, fora do escopo)
+- Zero commits, zero push, zero código alterado nesta tarefa
