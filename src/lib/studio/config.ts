@@ -16,17 +16,29 @@ function bool(v: string | undefined, fallback: boolean): boolean {
   return v === 'true' || v === '1'
 }
 
+/** Primeiro valor NÃO-VAZIO (trim) de uma cadeia de env vars; undefined se todos vazios.
+ *  Strings vazias (ex.: var configurada como "" no dashboard) NÃO contam —
+ *  o default do config deve ser aplicado (comportamento prometido pelo
+ *  env-validator: "config.ts usará o default"). */
+function envStr(...vals: Array<string | undefined>): string | undefined {
+  for (const v of vals) {
+    const t = (v ?? '').trim()
+    if (t) return t
+  }
+  return undefined
+}
+
 export const STUDIO_CONFIG = {
   // ---------- MODELOS (nomenclatura oficial: GLM_MODEL/QWEN_MODEL/HY3_MODEL/DEEPSEEK_MODEL) ----------
   models: {
     // GLM → Master/Orquestrador (compat: MODEL_MASTER)
-    master: process.env.GLM_MODEL ?? process.env.MODEL_MASTER ?? 'glm-5.3-flash',
+    master: envStr(process.env.GLM_MODEL, process.env.MODEL_MASTER) ?? 'glm-5.3-flash',
     // Qwen → Coding/Implementação (compat: MODEL_CODING)
-    coding: process.env.QWEN_MODEL ?? process.env.MODEL_CODING ?? 'qwen3.8-flash',
+    coding: envStr(process.env.QWEN_MODEL, process.env.MODEL_CODING) ?? 'qwen3.8-flash',
     // Hy3 → Review/QA (compat: MODEL_REVIEW)
-    review: process.env.HY3_MODEL ?? process.env.MODEL_REVIEW ?? 'hy3',
+    review: envStr(process.env.HY3_MODEL, process.env.MODEL_REVIEW) ?? 'hy3',
     // DeepSeek → emergência/fallback OPCIONAL
-    deepseek: process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-flash',
+    deepseek: envStr(process.env.DEEPSEEK_MODEL) ?? 'deepseek-v4-flash',
     // DeepSeek DESATIVADO POR PADRÃO — somente fallback configurável.
     // O sistema funciona COMPLETAMENTE sem DeepSeek.
     enableDeepseek: bool(process.env.ENABLE_DEEPSEEK, false),
@@ -56,8 +68,8 @@ export const STUDIO_CONFIG = {
 
   // ---------- EXECUÇÃO / SANDBOX ----------
   executor: {
-    provider: (process.env.EXECUTION_PROVIDER ?? 'local') as 'local' | 'docker' | 'remote',
-    workspacesRoot: process.env.WORKSPACES_ROOT ?? '/home/z/my-project/workspaces',
+    provider: (envStr(process.env.EXECUTION_PROVIDER) ?? 'local') as 'local' | 'docker' | 'remote',
+    workspacesRoot: envStr(process.env.WORKSPACES_ROOT) ?? '/home/z/my-project/workspaces',
     maxCommandTimeoutMs: num(process.env.MAX_COMMAND_TIMEOUT, 120_000),
     maxProcessCount: num(process.env.MAX_PROCESS_COUNT, 50),
     maxOutputBytes: num(process.env.MAX_OUTPUT_BYTES, 200_000),
