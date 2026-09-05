@@ -13,6 +13,18 @@ import { runTool, getTool, toolsForPermissions } from '../tools'
 import { toolToSchema, type ToolCtx } from '../tools/types'
 import { emitEvent } from '../events/bus'
 import { compressHistory } from '../context/context-manager'
+
+/** Nome de produto do agente para mensagens de evento (server-side). */
+function agentDisplayName(agentId: string): string {
+  const names: Record<string, string> = {
+    master: 'Planejador',
+    coding: 'Engenheiro de Implementação',
+    testing: 'Verificador de Testes',
+    review: 'Revisor de Qualidade',
+    github: 'Agente de Publicação',
+  }
+  return names[agentId] ?? 'Agente'
+}
 import { RepeatedFailureDetector } from '../orchestrator/loop-detector'
 import type { AgentDefinition } from './definitions'
 import type { ChatMessage } from '../models/types'
@@ -456,7 +468,7 @@ export class AgentRunner {
       runId: this.runId,
       agent: agent.id,
       status,
-      message: `${agent.name} finalizado (${status}) em ${(durationMs / 1000).toFixed(1)}s — ${this.steps.length} passos, ${this.tokensIn + this.tokensOut} tokens`,
+      message: `${agentDisplayName(agent.id)} finalizado (${status}) em ${(durationMs / 1000).toFixed(1)}s — ${this.steps.length} passos, ${this.tokensIn + this.tokensOut} tokens`,
       durationMs,
       data: { steps: this.steps.length, tokensIn: this.tokensIn, tokensOut: this.tokensOut },
     })
