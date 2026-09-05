@@ -1,0 +1,225 @@
+// AI DEVELOPMENT STUDIO — Prisma Schema
+// Banco de dados SQLite (arquivo local em ./db)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// USERS & SESSIONS (autenticação)
+// ============================================================
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         String    @default("user") // user | admin
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions           Session[]
+  projects           Project[]
+  githubConnections  GithubConnection[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ============================================================
+// PROJECTS (workspace isolado por projeto)
+// ============================================================
+
+model Project {
+  id          String      @id @default(cuid())
+  userId      String
+  name        String
+  description String
+  type        String @default("EMPTY_PROJECT")
+  status      String @default("CREATED")
+  rootPath    String // caminho absoluto do workspace
+  gitBranch   String      @default("main")
+  // Memória estruturada do projeto: arquitetura, stack, decisões, convenções,
+  // dependências, problemas conhecidos, decisões dos agentes, tarefas concluídas
+  memory      Json       
+  // Configurações: modo de aprovação (MANUAL/ASSISTED/AUTONOMOUS), limites
+  settings    ProjectSettings?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks  Task[]
+  runs   AgentRun[]
+}
+
+model ProjectSettings {
+  id             String  @id @default(cuid())
+  projectId      String  @unique
+  approvalMode   String  @default("ASSISTED") // MANUAL | ASSISTED | AUTONOMOUS
+  maxAgentSteps  Int     @default(30)
+  maxTaskAttempts Int    @default(3)
+  maxReviewCycles Int    @default(5)
+  maxToolCalls   Int     @default(60)
+  maxExecutionMs Int     @default(600000) // 10 min por run
+  enableGithub   Boolean @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================
+// TASK GRAPH (grafo de tarefas com dependências)
+// ============================================================
+
+model Task {
+  id           String       @id @default(cuid())
+  projectId    String
+  order        Int          @default(0)
+  title        String
+  description  String
+  status       String   @default("PENDING")
+  priority     String @default("MEDIUM")
+  agentRole    String       @default("coding") // master|coding|review|testing|github|...
+  // Lista de ids de tarefas das quais esta depende (grafo)
+  dependencies Json        
+  attempts     Int          @default(0)
+  maxAttempts  Int          @default(3)
+  // Entrada: requirements, arquivos relevantes, contexto
+  input        Json        
+  // Resultado: arquivos criados/modificados, saída de testes, resumo
+  result       Json        
+  error        String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs    AgentRun[]
+
+  @@index([projectId, status])
+}
+
+// ============================================================
+// AGENT RUNS (execuções de agentes)
+// ============================================================
+
+model AgentRun {
+  id          String    @id @default(cuid())
+  taskId      String?
+  projectId   String
+  agentId     String // ex: master, coding, review, testing, github
+  model       String // modelo lógico usado: glm-5.3-flash, qwen3.8-flash, hy3
+  runType     String    @default("TASK") // PLAN | TASK | TEST | REVIEW | FIX
+  status      String @default("STARTED")
+  steps       Int       @default(0)
+  tokensIn    Int       @default(0)
+  tokensOut   Int       @default(0)
+  durationMs  Int       @default(0)
+  // Log estruturado do run: cada passo (thought/action/observation)
+  log         Json     
+  error       String?
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  project Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task    Task?      @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  calls   ToolCall[]
+
+  @@index([projectId])
+  @@index([taskId])
+}
+
+// ============================================================
+// TOOL CALLS (auditoria de todas as chamadas de ferramentas)
+// ============================================================
+
+model ToolCall {
+  id         String          @id @default(cuid())
+  runId      String
+  projectId  String
+  tool       String // ex: create_file, run_command, git_commit
+  args       Json           
+  status     String
+  output     String? // saída truncada para auditoria
+  error      String?
+  durationMs Int             @default(0)
+  createdAt  DateTime        @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+// ============================================================
+// ACTIVITY EVENTS (observabilidade / sistema de eventos)
+// ============================================================
+
+model ActivityEvent {
+  id         String   @id @default(cuid())
+  projectId  String?
+  taskId     String?
+  runId      String?
+  type       String // agent.started, tool.called, test.failed, review.approved...
+  agent      String?
+  tool       String?
+  action     String?
+  status     String?
+  message    String
+  data       Json    
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([type, createdAt])
+}
+
+// ============================================================
+// GITHUB CONNECTIONS (token NUNCA armazenado em texto puro no DB)
+// ============================================================
+
+model GithubConnection {
+  id          String   @id @default(cuid())
+  userId      String
+  login       String // login GitHub do token owner
+  tokenLast4  String // apenas últimos 4 caracteres, para identificação
+  scopes      Json    
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ============================================================
+// MODEL USAGE (uso agregado por modelo — economia de tokens)
+// ============================================================
+
+model ModelUsage {
+  id             String   @id @default(cuid())
+  day            String // YYYY-MM-DD
+  model          String
+  requests       Int      @default(0)
+  promptTokens   Int      @default(0)
+  completionTokens Int    @default(0)
+  totalTokens    Int      @default(0)
+  errors         Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@unique([day, model])
+}
