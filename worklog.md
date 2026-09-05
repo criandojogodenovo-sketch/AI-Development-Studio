@@ -188,3 +188,35 @@ Stage Summary:
 - Neon PostgreSQL de produção: migrations aplicadas + validação CRUD 22/22 + E2E 14/14
 - Segurança preservada de ponta a ponta: zero vazamentos (scan 13 padrões + grep ad-hoc das credenciais reais + árvore remota auditada)
 - PENDENTE (externo): reset da quota do provedor LLM do sandbox para revalidar execução completa do pipeline (planejamento já real; execução de agentes já evidenciada em sessões anteriores)
+
+---
+Task ID: 11
+Agent: main (Super Z — LEAD ENGINEER)
+Task: CONFIGURAÇÃO OPERACIONAL — auditoria completa de process.env + validação de ambiente no backend + testes + build + push
+
+Work Log (AUDITAR → VALIDAR → IMPLEMENTAR → TESTAR → BUILDAR → COMMITAR):
+- AUDITORIA REAL de todos os usos de process.env (src/, mini-services/, scripts/): 36+ variáveis consumidas, TODAS server-side
+- Frontend: ZERO process.env em componentes/hooks/page — acesso exclusivo via fetch() para /api/*; interseção importadores de config.ts × 'use client' = VAZIA (GITHUB_TOKEN/AUTH_SECRET nunca atingem o bundle)
+- NEXT_PUBLIC_*: NENHUMA ocorrência no código; validator ERRA se alguém definir NEXT_PUBLIC_<secret>
+- DATABASE_URL: exclusiva do Prisma (env() no schema) — server-only por design; cookie de sessão HttpOnly+sameSite=lax confirmado
+- BAI_API_KEY_1/2: exclusivas de BAIKeyManager/BAIProvider/ModelRouter (server-only)
+- GITHUB_CLIENT_SECRET: NÃO consumida por nenhuma linha de código (OAuth futuro) — marcada [RESERVADA] no .env.example com aviso de manter segredo
+- DeepSeek: gate TRILO confirmado — chat() direto lança DEEPSEEK_BLOQUEADO; isModelAvailable() nega; chatWithDeepseekFallback() exige enableDeepseek E difficulty=hard E limite diário → ENABLE_DEEPSEEK=false = completamente desativado
+- AUDITORIA HONESTA documentada: AUTH_SECRET declarada no config mas fluxo de sessão usa tokens opacos no DB (não consome) → [RESERVADA]; NEXT_PUBLIC_APP_URL sem uso → [RESERVADA]; GITHUB_CLIENT_ID/SECRET sem uso → [RESERVADAS]
+- NOVO src/lib/studio/security/env-validator.ts: validação POR CONSUMIDOR (cada variável validada conforme o componente que a usa) — DATABASE_URL obrigatória + protocolo postgres + rejeita channel_binding=require; EXECUTION_PROVIDER whitelist; WORKSPACES_ROOT absoluta; numéricos (27 vars) avisam quando config.ts trocaria por default; NEXT_PUBLIC_<secret> = erro bloqueante; NUNCA imprime valores (teste V12 faz grep de leaks na saída)
+- NOVO src/instrumentation.ts: hook de boot do Next.js (register) — roda a validação 1x na subida do servidor; PRODUÇÃO: fail-fast com erro claro; DEV: log destacado
+- NOVO scripts/test-env-validator.ts: 36 testes (V1-V15) — 36/36 APROVADOS (inclui teste de não-vazamento: saída inteira grepada por valores fake de secrets)
+- Boot real verificado: summary seguro no log (booleanos + last-4 do token), warn honesto do sandbox, "✅ Variáveis obrigatórias presentes e válidas"
+- TESTE NEGATIVO real: servidor sem DATABASE_URL → erro claro na subida (nome + consumidor Prisma + correção); servidor normal restaurado (200)
+- .env.example REESCRITO com legenda honesta: [OBRIGATÓRIA]/[OPCIONAL]/[RESERVADA] + nota channel_binding (Prisma não suporta) + sem NENHUMA credencial real
+- Migração: prisma migrate status → "Database schema is up to date!" (schema inalterado — migração NÃO necessária; verificada)
+- Testes: BAIKeyManager 30/30, JSON parser 5/5, env-validator 36/36, E2E 14/14 (com validação ativa)
+- Build produção: OK (13 rotas API + SPA); lint 0 erros; tsc sem erros nos arquivos novos
+- Secret scan: LIMPO; token GitHub e senha Neon grepados contra todos os arquivos rastreados → AUSENTES
+- Limitação externa inalterada: quota 429 do provedor LLM do sandbox (test-json-repair.mjs é integração LLM — não unitário); scripts determinísticos 100% verdes
+
+Stage Summary:
+- Auditoria completa com evidência: 100% das variáveis de segredo server-side; DeepSeek triplamente desativado por padrão
+- Validação de ambiente no backend implementada e testada (36/36) com fail-fast em produção e erros claros por consumidor
+- .env.example honesto (obrigatórias/opcionais/reservadas; zero credenciais)
+- Commit + push ao repo oficial executados (ver git log)
