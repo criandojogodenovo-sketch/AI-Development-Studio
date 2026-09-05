@@ -255,3 +255,29 @@ Stage Summary:
 - Correção mínima Vercel oficialmente no repo; próximo passo do usuário: disparar deploy de confirmação na Vercel (lembrar variáveis da Lista A — mínimo DATABASE_URL)
 - worklog Task 13 mantido LOCAL e não-commitado (instrução: commit apenas dos 2 arquivos)
 - Nota operacional: resets de ambiente podem reverter working tree/.env/config git — verificar git log + artefatos antes de qualquer operação sensível (checklist registrado aqui)
+
+---
+Task ID: 14
+Agent: main (Super Z — LEAD ENGINEER)
+Task: DIAGNÓSTICO SOMENTE-LEITURA do deployment Vercel (dpl_AnSkMacyFrX… commit bf2bd03) — sem alterar repo/Vercel
+
+Work Log (APENAS CONSULTA — zero modificações em código/config/deploy):
+- Token Vercel guardado em .env (gitignored, nunca impresso/commitado); evidências em .zscripts/vercel-diag/ (gitignored)
+- API: v2/user (conta oficialwehelp-4013, plano hobby) + v2/teams (time mad-ae04, billing plan HOBBY)
+- Deployment localizado por URL: dpl_AnSkMacyFrMXCjNPvWckbVRZtuug, sha bf2bd03a54db…, target production, state ERROR
+- ERRO REAL (v13/deployments): errorCode=invalid_max_duration; mensagem: "Builder returned invalid maxDuration value for Serverless Function 'api/projects/[id]/run'. Serverless Functions must have a maxDuration between 1 and 300 for plan hobby."
+- v3/events (134 eventos): build OK (guard da Task 12 visível e funcional, 13 rotas, "Created all serverless functions"), "Build Completed in /vercel/output [26s]", ÚLTIMO evento = "Deploying outputs…" — a plataforma rejeitou na validação de config das Functions, pós-build
+- CLI 59.11.7 (bunx): vercel logs → "Logs are unavailable because deployment … never reached READY and ended in ERROR"; vercel inspect → status ● Error (errorCode só disponível via API)
+- HISTÓRICO: TODOS os 4 deployments do projeto falharam com o MESMO invalid_max_duration (2× sha 6960304 PRÉ-fix e 2× sha bf2bd03 PÓS-fix) → causa anterior e independente da correção standalone/cp da Task 12
+- RAIZ no código: src/app/api/projects/[id]/run/route.ts:9 → export const maxDuration = 900 (900 > 300 máximo hobby); terminal/route.ts:9 = 300 (no limite, válido)
+- REPRODUÇÃO LOCAL com vercel build (adapter @vercel/next, SEM deploy) em cópia isolada (.zscripts, hardlinks p/ node_modules, repo intocado): sequência idêntica ao builder da Vercel; output confirma run.func/.vc-config.json maxDuration=900 e terminal.func=300
+- TAMANHOS medidos (arquitetura filePathMap, resolvendo 256 arquivos/function): cada API function ≈ 78,4 MB; upload único total 78,8 MB / 283 arquivos; static 1,2 MB; dominado por @prisma/client 57,1 MB + .prisma 19,1 MB; sharp/@img AUSENTES do upload (não rastreados pelo adapter); TUDO muito abaixo dos limites (250 MB/function) → tamanho NÃO é o problema
+- File tree da API para o deployment com erro: indisponível ("File tree not found") — medição local do adapter idêntico é a melhor evidência
+- Env do projeto: 43 variáveis configuradas (production+preview) — não é fator (build OK; validação falhou só na config maxDuration)
+- REPO/VERCEL: zero alterações, zero commit/push, zero deploy (verificado: git status limpo, HEAD bf2bd03)
+
+Stage Summary:
+- CAUSA CONFIRMADA com erro exato da plataforma: invalid_max_duration (900 > 300 hobby) na rota /api/projects/[id]/run — presente em TODOS os deployments desde o primeiro
+- A correção Task 12 (standalone/cp) funcionou na Vercel e não era o bloqueio; sharp/prisma/tamanhos irrelevantes
+- Correção mínima recomendada (NÃO aplicada, aguarda aprovação): 1 linha — maxDuration 900 → 300 em run/route.ts
+- Confiança: ALTA (erro exato + código + config do adapter + 4/4 deployments consistentes)
