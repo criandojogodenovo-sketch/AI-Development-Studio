@@ -89,18 +89,27 @@ export async function projectProgress(projectId: string) {
     completed,
     percent: total ? Math.round((completed / total) * 100) : 0,
     byStatus,
-    tasks: tasks.map((t) => ({
-      id: t.id,
-      order: t.order,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
-      agentRole: t.agentRole,
-      attempts: t.attempts,
-      maxAttempts: t.maxAttempts,
-      dependencies: (t.dependencies as unknown as string[]) ?? [],
-      error: t.error,
-    })),
+    tasks: tasks.map((t) => {
+      const resultJson = t.result as { output?: unknown } | null
+      return {
+        id: t.id,
+        order: t.order,
+        title: t.title,
+        description: t.description,
+        status: t.status,
+        priority: t.priority,
+        agentRole: t.agentRole,
+        attempts: t.attempts,
+        maxAttempts: t.maxAttempts,
+        dependencies: (t.dependencies as unknown as string[]) ?? [],
+        error: t.error,
+        // Saída final do agente (resumo/evidências) — renderizada como Markdown na UI
+        result:
+          resultJson && typeof resultJson === 'object' && typeof resultJson.output === 'string'
+            ? resultJson.output.slice(0, 4000)
+            : undefined,
+      }
+    }),
   }
 }
 

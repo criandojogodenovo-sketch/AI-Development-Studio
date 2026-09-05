@@ -11,7 +11,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStudio } from '@/hooks/use-studio'
-import { statusColor, timeAgo, TEMPLATE_ICONS } from './ui-helpers'
+import { statusColor, statusLabel, timeAgo, TEMPLATE_ICONS } from './ui-helpers'
 import { Loader2, Plus, Trash2, Play, FolderOpen } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -95,7 +95,7 @@ export function ProjectsView({ onOpenProject, presetRequest }: {
                   </div>
                   <p className="text-xs text-zinc-500 truncate mt-0.5">{p.description || p.type}</p>
                 </button>
-                <Badge variant="outline" className={statusColor(p.status)}>{p.status}</Badge>
+                <Badge variant="outline" className={statusColor(p.status)}>{statusLabel(p.status)}</Badge>
               </div>
               <Progress value={p.percent} className="h-1.5" />
               <div className="flex items-center justify-between text-[11px] text-zinc-600">

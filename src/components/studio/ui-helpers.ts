@@ -76,3 +76,64 @@ export const TEMPLATE_ICONS: Record<string, string> = {
 export const AGENT_ICONS: Record<string, string> = {
   master: '🧠', coding: '👨‍💻', review: '🔍', testing: '🧪', github: '🐙',
 }
+
+// ---------- LINGUAGEM DE PRODUTO (não expõe nomes técnicos) ----------
+
+export const AGENT_LABELS: Record<string, string> = {
+  master: 'Planejador',
+  coding: 'Engenheiro de Implementação',
+  testing: 'Verificador de Testes',
+  review: 'Revisor de Qualidade',
+  github: 'Agente de Publicação',
+}
+
+export function agentLabel(id?: string): string {
+  return AGENT_LABELS[id ?? ''] ?? 'Agente'
+}
+
+export const STATUS_LABELS: Record<string, string> = {
+  CREATED: 'Criado',
+  PLANNING: 'Planejando',
+  RUNNING: 'Em execução',
+  REVIEW: 'Em revisão',
+  COMPLETED: 'Concluído',
+  FAILED: 'Falhou',
+  PARTIAL: 'Parcial',
+  PENDING: 'Aguardando',
+  BLOCKED: 'Bloqueada',
+  CANCELLED: 'Cancelada',
+  STARTED: 'Iniciada',
+  REPEATED_FAILURE: 'Falha repetida',
+  MAX_LIMITS_REACHED: 'Limite atingido',
+  TIMEOUT: 'Tempo esgotado',
+  OK: 'OK',
+  ERROR: 'Erro',
+  DENIED: 'Negado',
+}
+
+export function statusLabel(s?: string): string {
+  return STATUS_LABELS[s ?? ''] ?? (s ?? '—')
+}
+
+export const RUN_TYPE_LABELS: Record<string, string> = {
+  PLAN: 'Planejamento',
+  EXECUTE: 'Execução',
+  IMPLEMENT: 'Implementação',
+  REVIEW: 'Revisão',
+  TEST: 'Testes',
+  FIX: 'Correção',
+}
+
+export function runTypeLabel(t?: string): string {
+  return RUN_TYPE_LABELS[t ?? ''] ?? (t ?? '')
+}
+
+/** Papel de produto a partir de um identificador técnico de modelo (histórico de uso). */
+export function modelRoleLabel(modelId?: string): string {
+  const id = String(modelId ?? '')
+  if (id.startsWith('glm')) return 'Planejador'
+  if (id.startsWith('qwen')) return 'Engenheiro de Implementação'
+  if (id.startsWith('hy3')) return 'Revisor de Qualidade'
+  if (id.startsWith('deepseek')) return 'Reserva técnica'
+  return 'Motor de IA'
+}

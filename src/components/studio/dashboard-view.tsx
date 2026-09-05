@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { useStudio } from '@/hooks/use-studio'
-import { statusColor, eventIcon, timeAgo, formatTokens } from './ui-helpers'
+import { statusColor, statusLabel, eventIcon, timeAgo } from './ui-helpers'
 import { Button } from '@/components/ui/button'
 import { FolderKanban, Zap, Coins, Activity, ArrowRight, Gamepad2 } from 'lucide-react'
 
@@ -13,7 +13,7 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
   onNewProject: () => void
   onNavigate: (view: string) => void
 }) {
-  const { projects, liveEvents, events, templates } = useStudio()
+  const { projects, liveEvents, events, templates, wsConnected } = useStudio()
 
   const totals = {
     projects: projects.length,
@@ -22,13 +22,22 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
     tasks: projects.reduce((a, p) => a + p.tasksTotal, 0),
     tasksDone: projects.reduce((a, p) => a + p.tasksCompleted, 0),
   }
-  const feed = [...liveEvents, ...events].slice(0, 12)
+  // Feed com deduplicação por identidade (WS pode reentregar evento já buscado do banco)
+  const seen = new Set<string>()
+  const feed = [...liveEvents, ...events]
+    .filter((e) => {
+      const key = e.id ? `id:${e.id}` : `${e.type}:${e.message}:${e.createdAt ?? ''}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, 12)
 
   const stats = [
     { label: 'Projetos', value: totals.projects, icon: FolderKanban, hint: `${totals.running} em execução` },
     { label: 'Tarefas concluídas', value: `${totals.tasksDone}/${totals.tasks}`, icon: Zap, hint: 'grafo de tarefas' },
     { label: 'Concluídos', value: totals.completed, icon: Coins, hint: 'pipelines finalizados' },
-    { label: 'Eventos', value: liveEvents.length, icon: Activity, hint: 'tempo real' },
+    { label: 'Eventos', value: liveEvents.length + events.length, icon: Activity, hint: 'atividade do estúdio' },
   ]
 
   return (
@@ -84,7 +93,7 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
             <CardTitle className="text-sm text-zinc-400">Projetos recentes</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2 max-h-96 overflow-y-auto">
-            {projects.length === 0 && <p className="text-sm text-zinc-600">Nenhum projeto ainda — crie o primeiro.</p>}
+            {projects.length === 0 && <p className="text-sm text-zinc-500">Nenhum projeto ainda — crie o primeiro.</p>}
             {projects.slice(0, 6).map((p) => (
               <button
                 key={p.id}
@@ -93,10 +102,10 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-medium text-sm truncate">{p.name}</span>
-                  <Badge variant="outline" className={statusColor(p.status)}>{p.status}</Badge>
+                  <Badge variant="outline" className={`${statusColor(p.status)} shrink-0`}>{statusLabel(p.status)}</Badge>
                 </div>
                 <Progress value={p.percent} className="h-1.5 mt-2" />
-                <div className="flex justify-between text-[11px] text-zinc-600 mt-1">
+                <div className="flex justify-between text-[11px] text-zinc-500 mt-1">
                   <span>{p.tasksCompleted}/{p.tasksTotal} tarefas</span>
                   <span>{timeAgo(p.updatedAt)}</span>
                 </div>
@@ -109,19 +118,21 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-zinc-400 flex items-center justify-between">
               Atividade
-              <span className="flex items-center gap-1 text-[10px] text-emerald-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> tempo real
-              </span>
+              {wsConnected && (
+                <span className="flex items-center gap-1 text-[10px] text-emerald-500">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> ao vivo
+                </span>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent className="max-h-96 overflow-y-auto space-y-1.5">
-            {feed.length === 0 && <p className="text-sm text-zinc-600">Sem eventos ainda — inicie um pipeline.</p>}
+            {feed.length === 0 && <p className="text-sm text-zinc-500">Sem eventos ainda — inicie um pipeline.</p>}
             {feed.map((e, i) => (
-              <div key={i} className="flex items-start gap-2 text-xs border-b border-zinc-800/50 pb-1.5">
+              <div key={e.id ?? i} className="flex items-start gap-2 text-xs border-b border-zinc-800/50 pb-1.5">
                 <span>{eventIcon(e.type)}</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-zinc-300 truncate">{e.message}</p>
-                  <p className="text-zinc-600 text-[10px]">{e.type} {e.createdAt ? `· ${timeAgo(e.createdAt)}` : '· agora'}</p>
+                  <p className="text-zinc-300 break-words">{e.message}</p>
+                  <p className="text-zinc-500 text-[10px]">{e.createdAt ? timeAgo(e.createdAt) : 'agora'}</p>
                 </div>
               </div>
             ))}

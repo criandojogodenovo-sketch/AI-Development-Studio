@@ -83,8 +83,9 @@ function sanitize(data: Record<string, unknown> | undefined): Record<string, unk
 /** Emite evento: DB + retransmissão websocket (fire-and-forget). */
 export async function emitEvent(payload: EventPayload): Promise<void> {
   const safeData = sanitize(payload.data)
+  let created: { id: string; createdAt: Date } | null = null
   try {
-    await db.activityEvent.create({
+    created = await db.activityEvent.create({
       data: {
         projectId: payload.projectId ?? null,
         taskId: payload.taskId ?? null,
@@ -98,21 +99,35 @@ export async function emitEvent(payload: EventPayload): Promise<void> {
         data: (safeData ?? {}) as object,
         durationMs: payload.durationMs ?? null,
       },
+      select: { id: true, createdAt: true },
     })
   } catch (e) {
     console.error('[events] falha ao persistir evento:', (e as Error).message)
   }
 
-  // Retransmissão ao mini-service de tempo real (não bloqueia o pipeline)
+  // Retransmissão ao mini-service de tempo real (não bloqueia o pipeline).
+  // Inclui id/createdAt do row persistido para a UI deduplicar e exibir horário.
   try {
     await fetch(`http://localhost:${STUDIO_CONFIG.events.ingestPort}/ingest`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...payload, data: safeData }),
+      body: JSON.stringify({
+        ...payload,
+        data: safeData,
+        ...(created ? { id: created.id, createdAt: created.createdAt } : {}),
+      }),
       signal: AbortSignal.timeout(2000),
     })
   } catch {
     // mini-service pode não estar rodando; evento já está no DB
+  }
+
+  // Higiene (amostragem leve): eventos de auditoria > 30 dias são removidos
+  // para a tabela não crescer indefinidamente. Best-effort, sem bloquear.
+  if (Math.random() < 0.05) {
+    db.activityEvent.deleteMany({
+      where: { createdAt: { lt: new Date(Date.now() - 30 * 24 * 3600 * 1000) } },
+    }).catch(() => {})
   }
 }
 

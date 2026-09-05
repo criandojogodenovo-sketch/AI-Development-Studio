@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
@@ -10,16 +10,22 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useStudio } from '@/hooks/use-studio'
-import { statusColor, eventIcon, timeAgo, formatDuration, AGENT_ICONS, formatTokens } from './ui-helpers'
+import { Markdown } from './markdown'
+import {
+  statusColor, statusLabel, eventIcon, timeAgo, formatDuration,
+  AGENT_ICONS, agentLabel, runTypeLabel, formatTokens,
+} from './ui-helpers'
 import {
   Loader2, Send, File as FileIcon, FileCode, TerminalSquare, Play,
-  FolderTree, ListChecks, Activity, Save, RefreshCw, Eye, ChevronRight, Bot
+  FolderTree, ListChecks, Activity, Save, RefreshCw, Eye, ChevronRight,
+  ChevronDown, Bot, CircleCheck, CircleAlert,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface TaskInfo {
   id: string; order: number; title: string; status: string; priority: string
-  agentRole: string; attempts: number; maxAttempts: number; dependencies: string[]; error?: string
+  agentRole: string; attempts: number; maxAttempts: number; dependencies: string[]
+  error?: string; result?: string; description?: string
 }
 interface RunInfo {
   id: string; agentId: string; model: string; runType: string; status: string
@@ -28,16 +34,16 @@ interface RunInfo {
 interface FileNode { path: string; type: 'file' | 'dir' }
 
 export function WorkspaceView({ onBack }: { onBack: () => void }) {
-  const { api, activeProjectId, liveEvents, wsConnected, projects } = useStudio()
+  const { api, activeProjectId, liveEvents } = useStudio()
   const [project, setProject] = useState<any>(null)
   const [tasks, setTasks] = useState<TaskInfo[]>([])
   const [progress, setProgress] = useState({ percent: 0, completed: 0, total: 0, byStatus: {} as Record<string, number> })
   const [files, setFiles] = useState<FileNode[]>([])
   const [runs, setRuns] = useState<RunInfo[]>([])
-  const [memory, setMemory] = useState<any>({})
   const [command, setCommand] = useState('')
   const [running, setRunning] = useState(false)
   const [tab, setTab] = useState('tasks')
+  const [expandedTask, setExpandedTask] = useState<string | null>(null)
   const [editPath, setEditPath] = useState<string | null>(null)
   const [editContent, setEditContent] = useState('')
   const [editDirty, setEditDirty] = useState(false)
@@ -45,9 +51,8 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
   const [termHistory, setTermHistory] = useState<Array<{ cmd: string; out: string; err: string; code: number }>>([])
   const [termCmd, setTermCmd] = useState('')
   const [termBusy, setTermBusy] = useState(false)
-  const termRef = useRef<HTMLDivElement>(null)
 
-  const projectSummary = projects.find((p) => p.id === activeProjectId)
+  const pipelineActive = project?.status === 'PLANNING' || project?.status === 'RUNNING'
 
   const load = useCallback(async () => {
     if (!activeProjectId) return
@@ -58,7 +63,6 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
       setProgress({ percent: d.progress.percent, completed: d.progress.completed, total: d.progress.total, byStatus: d.progress.byStatus })
       setFiles(d.files)
       setRuns(d.runs)
-      setMemory(d.memory)
     } catch (e) {
       toast.error((e as Error).message)
     }
@@ -66,7 +70,7 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
 
   useEffect(() => { load() }, [load])
 
-  // Auto-refresh quando eventos do projeto chegam
+  // Auto-refresh quando eventos do projeto chegam (websocket)
   useEffect(() => {
     const relevant = liveEvents.some((e) => e.projectId === activeProjectId)
     if (relevant) {
@@ -74,6 +78,14 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
       return () => clearTimeout(t)
     }
   }, [liveEvents, activeProjectId, load])
+
+  // POLLING: enquanto o pipeline está ativo, atualiza a cada 4s.
+  // Necessário em produção (sem websocket) — a UI continua viva.
+  useEffect(() => {
+    if (!pipelineActive) return
+    const iv = setInterval(load, 4000)
+    return () => clearInterval(iv)
+  }, [pipelineActive, load])
 
   const startPipeline = async () => {
     if (!command.trim() || !activeProjectId) return
@@ -83,7 +95,7 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
         method: 'POST',
         body: JSON.stringify({ request: command.trim() }),
       })
-      toast.success('Pipeline iniciado — Master Agent analisando o pedido')
+      toast.success('Pedido recebido — o Planejador está analisando')
       setCommand('')
       setTab('tasks')
       setTimeout(load, 1500)
@@ -163,9 +175,14 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
       {/* Header do projeto */}
       <div className="flex items-center gap-2 flex-wrap">
         <Button variant="ghost" size="sm" onClick={onBack} className="text-zinc-400">← Voltar</Button>
-        <h2 className="font-bold text-lg truncate">{project?.name ?? '...'}</h2>
-        <Badge variant="outline" className={statusColor(project?.status)}>{project?.status ?? '—'}</Badge>
-        {wsConnected && <span className="flex items-center gap-1 text-[10px] text-emerald-500"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />live</span>}
+        <h2 className="font-bold text-lg truncate">{project?.name ?? 'Carregando…'}</h2>
+        <Badge variant="outline" className={statusColor(project?.status)}>{statusLabel(project?.status)}</Badge>
+        {pipelineActive && (
+          <span className="flex items-center gap-1.5 text-[11px] text-emerald-400">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            {project?.status === 'PLANNING' ? 'Planejando' : 'Executando'} — atualização automática
+          </span>
+        )}
         <Button variant="ghost" size="icon" onClick={load} className="ml-auto"><RefreshCw className="w-4 h-4" /></Button>
       </div>
 
@@ -177,9 +194,9 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
             <Textarea
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              placeholder="Ex: Cria um mini-game 2D de sobrevivência para celular. / Corrige o bug nos controles. / Adiciona sistema de vidas."
+              placeholder="Descreva o que você quer construir ou corrigir. Ex: Cria um mini-game 2D de sobrevivência para celular / Corrige o bug nos controles / Adiciona sistema de vidas."
               rows={2}
-              className="border-0 bg-transparent focus-visible:ring-0 text-sm resize-none"
+              className="border-0 bg-transparent focus-visible:ring-0 text-sm resize-none placeholder:text-zinc-500"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) startPipeline()
               }}
@@ -188,8 +205,8 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
               {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
             </Button>
           </div>
-          <p className="text-[10px] text-zinc-600 mt-1">
-            MASTER AGENT → análise → plano → task graph → agentes → implementação → testes → review → correções
+          <p className="text-[10px] text-zinc-500 mt-1">
+            Fluxo dos agentes: planejamento → implementação → testes → revisão → correção automática
           </p>
         </CardContent>
       </Card>
@@ -197,9 +214,13 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
       {/* Progresso */}
       {progress.total > 0 && (
         <div className="space-y-1">
-          <div className="flex justify-between text-xs text-zinc-500">
-            <span>{progress.completed}/{progress.total} tarefas ({progress.percent}%)</span>
-            <span>{Object.entries(progress.byStatus).filter(([k]) => k !== 'COMPLETED').map(([k, v]) => `${k}:${v}`).join(' ')}</span>
+          <div className="flex justify-between items-center text-xs text-zinc-400">
+            <span>{progress.completed}/{progress.total} tarefas concluídas ({progress.percent}%)</span>
+            <span className="flex flex-wrap gap-2 justify-end">
+              {Object.entries(progress.byStatus).filter(([k]) => k !== 'COMPLETED').map(([k, v]) => (
+                <span key={k} className="text-zinc-500">{statusLabel(k)}: {v}</span>
+              ))}
+            </span>
           </div>
           <Progress value={progress.percent} className="h-2" />
         </div>
@@ -218,45 +239,94 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
 
         {/* ---- TAREFAS (task graph) ---- */}
         <TabsContent value="tasks" className="mt-3 space-y-2">
-          {tasks.length === 0 && (
+          {tasks.length === 0 && !pipelineActive && (
             <Card className="border-zinc-800 bg-zinc-900/60">
-              <CardContent className="p-6 text-center text-sm text-zinc-500">
-                Nenhuma tarefa ainda. Envie um pedido na barra acima — o Master Agent criará o grafo de tarefas.
+              <CardContent className="p-8 text-center space-y-2">
+                <ListChecks className="w-10 h-10 mx-auto text-zinc-600" />
+                <p className="text-sm text-zinc-400">Nenhuma tarefa ainda</p>
+                <p className="text-xs text-zinc-500">
+                  Descreva na barra acima o que você quer construir — o Planejador criará o plano de tarefas automaticamente.
+                </p>
               </CardContent>
             </Card>
           )}
-          {tasks.map((t, i) => (
-            <Card key={t.id} className="border-zinc-800 bg-zinc-900/60">
-              <CardContent className="p-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-zinc-600 font-mono w-6">#{String(t.order + 1).padStart(2, '0')}</span>
-                  <span>{AGENT_ICONS[t.agentRole] ?? '🤖'}</span>
-                  <span className="text-sm font-medium flex-1 truncate">{t.title}</span>
-                  <Badge variant="outline" className={statusColor(t.status)}>{t.status}</Badge>
-                </div>
-                <div className="flex items-center gap-3 mt-1 pl-8 text-[11px] text-zinc-600">
-                  <span>agente: {t.agentRole}</span>
-                  <span>tentativa: {t.attempts}/{t.maxAttempts + 5}</span>
-                  <span>prio: {t.priority}</span>
-                  {t.dependencies?.length > 0 && <span>deps: {t.dependencies.map((d) => tasks.findIndex((x) => x.id === d) + 1).filter(Boolean).join(',')}</span>}
-                </div>
-                {t.error && <p className="text-[11px] text-red-400/80 mt-1 pl-8 truncate">{t.error}</p>}
+          {tasks.length === 0 && pipelineActive && (
+            <Card className="border-emerald-900/50 bg-zinc-900/60">
+              <CardContent className="p-6 text-center space-y-2">
+                <Loader2 className="w-6 h-6 mx-auto animate-spin text-emerald-500" />
+                <p className="text-sm text-zinc-300">O Planejador está analisando seu pedido e montando o plano…</p>
+                <p className="text-xs text-zinc-500">As tarefas aparecem aqui em alguns segundos.</p>
               </CardContent>
             </Card>
-          ))}
+          )}
+          {tasks.map((t) => {
+            const expanded = expandedTask === t.id
+            return (
+              <Card key={t.id} className={`border-zinc-800 bg-zinc-900/60 ${expanded ? 'border-emerald-900/60' : ''}`}>
+                <CardContent className="p-3">
+                  <button
+                    className="w-full text-left"
+                    onClick={() => setExpandedTask(expanded ? null : t.id)}
+                    aria-expanded={expanded}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-zinc-500 font-mono w-6 shrink-0">#{String(t.order + 1).padStart(2, '0')}</span>
+                      <span className="shrink-0">{AGENT_ICONS[t.agentRole] ?? '🤖'}</span>
+                      <span className="text-sm font-medium flex-1 truncate">{t.title}</span>
+                      {t.status === 'COMPLETED' && <CircleCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
+                      {t.status === 'FAILED' && <CircleAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />}
+                      <Badge variant="outline" className={`${statusColor(t.status)} shrink-0`}>{statusLabel(t.status)}</Badge>
+                      {t.result && <ChevronDown className={`w-3.5 h-3.5 text-zinc-500 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />}
+                    </div>
+                    <div className="flex items-center gap-3 mt-1 pl-8 text-[11px] text-zinc-500">
+                      <span>{agentLabel(t.agentRole)}</span>
+                      {t.attempts > 0 && <span>tentativa {t.attempts}/{t.maxAttempts + 5}</span>}
+                    </div>
+                  </button>
+
+                  {/* Detalhe expandido: objetivo, erro e resultado do agente */}
+                  {expanded && (
+                    <div className="mt-2 pl-8 space-y-2 border-t border-zinc-800/70 pt-2">
+                      {t.description && (
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Objetivo</p>
+                          <Markdown content={String(t.description).slice(0, 2000)} compact />
+                        </div>
+                      )}
+                      {t.error && (
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wide text-red-400/80 mb-1">O que impediu esta etapa</p>
+                          <p className="text-xs text-red-400/90 break-words">{t.error}</p>
+                        </div>
+                      )}
+                      {t.result && (
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wide text-emerald-500/80 mb-1">Resultado do agente</p>
+                          <Markdown content={t.result} compact />
+                        </div>
+                      )}
+                      {!t.description && !t.error && !t.result && (
+                        <p className="text-xs text-zinc-500">Sem detalhes registrados para esta tarefa ainda.</p>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )
+          })}
           {/* Runs */}
           {runs.length > 0 && (
             <Card className="border-zinc-800 bg-zinc-900/60">
-              <CardHeader className="py-2"><CardTitle className="text-xs text-zinc-500">Execuções de agentes</CardTitle></CardHeader>
+              <CardHeader className="py-2"><CardTitle className="text-xs text-zinc-400">Histórico de execuções</CardTitle></CardHeader>
               <CardContent className="space-y-1">
                 {runs.slice(0, 10).map((r) => (
                   <div key={r.id} className="flex items-center gap-2 text-[11px] border-b border-zinc-800/50 pb-1">
                     <span>{AGENT_ICONS[r.agentId] ?? '🤖'}</span>
-                    <span className="text-zinc-400 w-24 truncate">{r.agentId} · {r.runType}</span>
-                    <Badge variant="outline" className={`${statusColor(r.status)} scale-90`}>{r.status}</Badge>
-                    <span className="text-zinc-600">{r.steps} passos</span>
-                    <span className="text-zinc-600">{formatTokens(r.tokensIn + r.tokensOut)} tok</span>
-                    <span className="text-zinc-600 ml-auto">{formatDuration(r.durationMs)}</span>
+                    <span className="text-zinc-400 w-36 truncate">{agentLabel(r.agentId)} · {runTypeLabel(r.runType)}</span>
+                    <Badge variant="outline" className={`${statusColor(r.status)} scale-90`}>{statusLabel(r.status)}</Badge>
+                    <span className="text-zinc-500">{r.steps} passos</span>
+                    <span className="text-zinc-500">{formatTokens(r.tokensIn + r.tokensOut)} tokens</span>
+                    <span className="text-zinc-500 ml-auto">{formatDuration(r.durationMs)}</span>
                   </div>
                 ))}
               </CardContent>
@@ -269,10 +339,14 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
           <Card className="border-zinc-800 bg-zinc-900/60">
             <CardContent className="p-2">
               <ScrollArea className="h-[420px]">
-                {files.length === 0 && <p className="p-4 text-sm text-zinc-600 text-center">Workspace vazio.</p>}
+                {files.length === 0 && (
+                  <p className="p-4 text-sm text-zinc-500 text-center">
+                    Nenhum arquivo ainda — inicie um pedido para os agentes criarem o projeto.
+                  </p>
+                )}
                 {Object.entries(fileGroups).map(([dir, items]) => (
                   <div key={dir} className="mb-2">
-                    <p className="text-[10px] uppercase tracking-wide text-zinc-600 px-2 py-1">{dir}</p>
+                    <p className="text-[10px] uppercase tracking-wide text-zinc-500 px-2 py-1">{dir}</p>
                     {items.map((f) => (
                       <button
                         key={f.path}
@@ -309,11 +383,11 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
                 <Textarea
                   value={editContent}
                   onChange={(e) => { setEditContent(e.target.value); setEditDirty(true) }}
-                  className="font-mono text-xs border-0 rounded-none bg-zinc-950 min-h-[420px] focus-visible:ring-0 resize-y"
+                  className="font-mono text-xs border-0 rounded-none bg-zinc-950 min-h-[420px] focus-visible:ring-0 resize-y text-zinc-200"
                   spellCheck={false}
                 />
               ) : (
-                <p className="p-8 text-center text-sm text-zinc-600">Abra um arquivo no painel Arquivos.</p>
+                <p className="p-8 text-center text-sm text-zinc-500">Abra um arquivo no painel Arquivos.</p>
               )}
             </CardContent>
           </Card>
@@ -329,14 +403,14 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
                   onChange={(e) => setTermCmd(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && runTerminal()}
                   placeholder="comando permitido: npm test · node --test test/ · git log · ls -la"
-                  className="font-mono text-xs bg-zinc-900 border-zinc-800"
+                  className="font-mono text-xs bg-zinc-900 border-zinc-800 placeholder:text-zinc-600"
                 />
                 <Button size="sm" onClick={runTerminal} disabled={termBusy || !termCmd.trim()} className="bg-emerald-600 hover:bg-emerald-500">
                   {termBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                 </Button>
               </div>
-              <p className="text-[10px] text-zinc-600">Executa na allowlist de segurança (mesma dos agentes). Comandos fora da lista são negados.</p>
-              <div ref={termRef} className="font-mono text-[11px] space-y-2 max-h-[400px] overflow-y-auto">
+              <p className="text-[10px] text-zinc-500">Executa na allowlist de segurança (mesma dos agentes). Comandos fora da lista são negados.</p>
+              <div className="font-mono text-[11px] space-y-2 max-h-[400px] overflow-y-auto">
                 {termHistory.map((h, i) => (
                   <div key={i} className="border-b border-zinc-900 pb-2">
                     <p className="text-emerald-500">$ {h.cmd}</p>
@@ -354,11 +428,11 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
         <TabsContent value="preview" className="mt-3">
           <Card className="border-zinc-800 bg-zinc-900/60">
             <CardHeader className="py-2">
-              <CardTitle className="text-xs text-zinc-400">Preview real do projeto (workspace servido)</CardTitle>
+              <CardTitle className="text-xs text-zinc-400">Preview do projeto</CardTitle>
             </CardHeader>
             <CardContent>
               {project?.type === 'API' ? (
-                <p className="text-sm text-zinc-500">Projetos API não têm preview visual. Use o Terminal para rodar o servidor (node server.js).</p>
+                <p className="text-sm text-zinc-400">Projetos de API não têm preview visual. Use o Terminal para rodar o servidor (node server.js).</p>
               ) : (
                 <div className="rounded-lg overflow-hidden border border-zinc-800 bg-white" style={{ aspectRatio: '9/16', maxHeight: 640 }}>
                   <iframe
@@ -379,16 +453,16 @@ export function WorkspaceView({ onBack }: { onBack: () => void }) {
             <CardContent className="p-3">
               <ScrollArea className="h-[420px]">
                 {projectEvents.length === 0 && (
-                  <p className="text-sm text-zinc-600 text-center p-4">Sem eventos ainda — inicie um pipeline.</p>
+                  <p className="text-sm text-zinc-500 text-center p-4">Sem eventos ainda — inicie um pedido na barra acima.</p>
                 )}
                 <div className="space-y-1.5">
                   {projectEvents.map((e, i) => (
-                    <div key={i} className="flex items-start gap-2 text-xs border-b border-zinc-800/50 pb-1.5">
+                    <div key={e.id ?? i} className="flex items-start gap-2 text-xs border-b border-zinc-800/50 pb-1.5">
                       <span>{eventIcon(e.type)}</span>
                       <div className="flex-1 min-w-0">
-                        <p className="text-zinc-300">{e.message}</p>
-                        <p className="text-zinc-600 text-[10px]">
-                          {e.type}{e.agent ? ` · ${e.agent}` : ''}{e.durationMs ? ` · ${formatDuration(e.durationMs)}` : ''} · agora
+                        <p className="text-zinc-300 break-words">{e.message}</p>
+                        <p className="text-zinc-500 text-[10px]">
+                          {e.durationMs ? `${formatDuration(e.durationMs)} · ` : ''}{e.createdAt ? timeAgo(e.createdAt) : 'agora'}
                         </p>
                       </div>
                     </div>

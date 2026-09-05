@@ -264,7 +264,13 @@ async function runReviewCycle(
 
 export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary> {
   const started = Date.now()
-  const totalDeadline = started + STUDIO_CONFIG.limits.maxTotalExecutionMs
+  // No serverless (Vercel) a invocação vive no máximo maxDuration (300s aqui);
+  // clamp do orçamento total para 270s evita tarefas RUNNING órfãs quando a
+  // função é suspensa. Fora do serverless, usa o orçamento configurado.
+  const effectiveBudgetMs = process.env.VERCEL
+    ? Math.min(STUDIO_CONFIG.limits.maxTotalExecutionMs, 270_000)
+    : STUDIO_CONFIG.limits.maxTotalExecutionMs
+  const totalDeadline = started + effectiveBudgetMs
   const tokens = { in: 0, out: 0 }
   const evidence: string[] = []
   const reviewCycle = { count: 0 }
@@ -284,7 +290,7 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
   const maxGuard = 200 // proteção estrutural absoluta
   while (guard++ < maxGuard) {
     if (Date.now() > totalDeadline) {
-      evidence.push(`TOTAL_DEADLINE excedido (${STUDIO_CONFIG.limits.maxTotalExecutionMs}ms) — parando`)
+      evidence.push(`TOTAL_DEADLINE excedido (${effectiveBudgetMs}ms) — parando com diagnóstico`)
       break
     }
     const ready = await readyTasks(req.projectId)
@@ -371,6 +377,16 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
   }
 
   // 3) VALIDAÇÃO FINAL (progresso + testes finais)
+  // Reconciliação: nenhuma tarefa pode permanecer RUNNING após o fim do loop
+  // (run encerrado — por conclusão, deadline ou falha estrutural)
+  const orphan = await db.task.updateMany({
+    where: { projectId: req.projectId, status: 'RUNNING' },
+    data: { status: 'FAILED', error: 'Execução interrompida antes do fim do run (reconciliação final)' },
+  }).catch(() => null)
+  if (orphan?.count) {
+    evidence.push(`${orphan.count} tarefa(s) em execução órfã(s) encerrada(s) na reconciliação final`)
+  }
+
   const progress = await projectProgress(req.projectId)
   const finalStatus: PipelineSummary['status'] =
     progress.percent === 100 ? 'COMPLETED' : progress.completed > 0 ? 'PARTIAL' : 'FAILED'

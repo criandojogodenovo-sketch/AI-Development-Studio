@@ -14,24 +14,34 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Z.ai Code Scaffold - AI-Powered Development",
-  description: "Modern Next.js scaffold optimized for AI-powered development with Z.ai. Built with TypeScript, Tailwind CSS, and shadcn/ui.",
-  keywords: ["Z.ai", "Next.js", "TypeScript", "Tailwind CSS", "shadcn/ui", "AI development", "React"],
-  authors: [{ name: "Z.ai Team" }],
-  icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+  title: {
+    default: "AI Development Studio",
+    template: "%s | AI Development Studio",
   },
+  description:
+    "Estúdio de desenvolvimento de software com agentes de IA: planejamento, implementação, testes e revisão automatizados — do pedido à entrega.",
+  keywords: [
+    "AI Development Studio",
+    "agentes de IA",
+    "desenvolvimento de software",
+    "automação de desenvolvimento",
+    "planejamento",
+    "revisão de código",
+  ],
+  authors: [{ name: "AI Development Studio" }],
+  applicationName: "AI Development Studio",
   openGraph: {
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
-    url: "https://chat.z.ai",
-    siteName: "Z.ai",
+    title: "AI Development Studio",
+    description:
+      "Desenvolvimento de software com agentes de IA — do planejamento à entrega.",
+    siteName: "AI Development Studio",
     type: "website",
   },
   twitter: {
-    card: "summary_large_image",
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
+    card: "summary",
+    title: "AI Development Studio",
+    description:
+      "Desenvolvimento de software com agentes de IA — do planejamento à entrega.",
   },
 };
 
@@ -41,7 +51,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="pt-BR" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitAgentRun, clientIp } from '@/lib/studio/security/rate-limit'
@@ -11,8 +11,11 @@ export const maxDuration = 300
 /**
  * POST /api/projects/:id/run — inicia o ENGINEERING PERFECTION LOOP.
  * Body: { request: "pedido do usuário em linguagem natural" }
- * O pipeline roda em background (não bloqueia a resposta);
- * o progresso chega via eventos (WebSocket + polling).
+ *
+ * A resposta sai imediatamente (202); o pipeline roda via after() do
+ * next/server — no serverless (Vercel) isso mantém a invocação viva
+ * após a resposta, dentro do maxDuration da função.
+ * O progresso chega via eventos (WebSocket + polling da UI).
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getSessionUser(req)
@@ -33,37 +36,61 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: 'PEDIDO_INVÁLIDO (descreva o que deseja, mín 5 caracteres)' }, { status: 400 })
   }
 
-  // Evita dois pipelines simultâneos no mesmo projeto
-  const active = await db.project.findFirst({ where: { id, status: { in: ['PLANNING', 'RUNNING'] } } })
-  if (active) {
-    return NextResponse.json({ error: 'PIPELINE_JÁ_ATIVO neste projeto' }, { status: 409 })
+  // Evita dois pipelines simultâneos no mesmo projeto — com recuperação:
+  // um run "vivo" que não atualiza nada há > 10 min é considerado travado
+  // (ex.: invocação suspensa pelo serverless) e é encerrado automaticamente.
+  const isActive = project.status === 'PLANNING' || project.status === 'RUNNING'
+  if (isActive) {
+    const latestTask = await db.task.findFirst({
+      where: { projectId: id },
+      orderBy: { updatedAt: 'desc' },
+      select: { updatedAt: true },
+    })
+    const lastActivity = Math.max(
+      new Date(project.updatedAt).getTime(),
+      latestTask ? new Date(latestTask.updatedAt).getTime() : 0
+    )
+    const staleMs = 10 * 60 * 1000
+    const isStale = Date.now() - lastActivity > staleMs
+
+    if (!isStale) {
+      return NextResponse.json({ error: 'PIPELINE_JÁ_ATIVO neste projeto' }, { status: 409 })
+    }
+
+    // Reconciliação do run travado: tarefas RUNNING órfãs → FAILED
+    const orphan = await db.task.updateMany({
+      where: { projectId: id, status: 'RUNNING' },
+      data: { status: 'FAILED', error: 'Execução interrompida (run anterior travou — recuperado automaticamente)' },
+    }).catch(() => null)
+    await emitEvent({
+      type: 'pipeline.failed',
+      projectId: id,
+      message: 'Execução anterior foi interrompida por inatividade — iniciando nova execução' +
+        (orphan?.count ? ` (${orphan.count} tarefa(s) penduradas encerradas)` : ''),
+    })
   }
 
-  // Executa em background; a API responde imediatamente
+  // Executa após a resposta (sobrevive ao freeze serverless dentro do maxDuration)
   const startedAt = new Date().toISOString()
-  const pipelinePromise = runPipeline({ projectId: id, userRequest, userId: user.id })
-    .then(async (summary) => {
+  after(async () => {
+    try {
+      const summary = await runPipeline({ projectId: id, userRequest, userId: user.id })
       await db.project.update({
         where: { id },
         data: { memory: { ...(project.memory as object), lastPipeline: { at: startedAt, request: userRequest, status: summary.status } } as object },
       }).catch(() => {})
-      return summary
-    })
-    .catch(async (e) => {
+    } catch (e) {
       await emitEvent({
         type: 'pipeline.failed',
         projectId: id,
         message: `Pipeline falhou: ${(e as Error).message}`,
       })
       await db.project.update({ where: { id }, data: { status: 'FAILED' } }).catch(() => {})
-      return null
-    })
-
-  // Não deixa promise órfã derrubar o processo
-  pipelinePromise.catch(() => {})
+    }
+  })
 
   return NextResponse.json(
-    { ok: true, startedAt, message: 'Pipeline iniciado — acompanhe em Tasks/Activity' },
+    { ok: true, startedAt, message: 'Pipeline iniciado — acompanhe em Tarefas/Atividade' },
     { status: 202 }
   )
 }

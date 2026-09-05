@@ -65,16 +65,20 @@ function StudioApp() {
             <span className="hidden sm:inline">AI Development Studio</span>
             <span className="sm:hidden">AI Studio</span>
           </button>
-          <span className={`ml-auto flex items-center gap-1.5 text-[10px] ${wsConnected ? 'text-emerald-500' : 'text-zinc-600'}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-600'}`} />
-            {wsConnected ? 'tempo real' : 'offline'}
-          </span>
-          <span className="text-xs text-zinc-500 truncate max-w-24">{user.name}</span>
+          {/* Indicador de conexão em tempo real — só quando conectado
+              (em produção a atualização é por polling; nada alarmante é exibido) */}
+          {wsConnected && (
+            <span className="ml-auto flex items-center gap-1.5 text-[10px] text-emerald-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              ao vivo
+            </span>
+          )}
+          <span className={`text-xs text-zinc-400 truncate max-w-24 ${wsConnected ? '' : 'ml-auto'}`}>{user.name}</span>
         </div>
       </header>
 
-      {/* Conteúdo */}
-      <main className="flex-1 mx-auto w-full max-w-6xl px-4 py-5 pb-24 md:pb-8">
+      {/* Conteúdo — md:pl-44 reserva espaço para a navegação lateral fixa (sem sobreposição) */}
+      <main className="flex-1 mx-auto w-full max-w-6xl px-4 py-5 pb-24 md:pb-8 md:pl-44 md:pr-6">
         {view === 'dashboard' && (
           <DashboardView
             onOpenProject={openProject}
