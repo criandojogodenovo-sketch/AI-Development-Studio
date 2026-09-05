@@ -48,8 +48,8 @@ export const STUDIO_CONFIG = {
 
   // ---------- B.AI (gateway dos modelos; server-side ONLY) ----------
   bai: {
-    // Endpoint OpenAI-compatible da B.AI (configurável)
-    baseUrl: process.env.BAI_BASE_URL ?? 'https://api.b.ai/v1',
+    // Endpoint OpenAI-compatible da B.AI (configurável; vazio → default)
+    baseUrl: envStr(process.env.BAI_BASE_URL) ?? 'https://api.b.ai/v1',
     // Cooldown local por chave após N falhas elegíveis consecutivas
     failuresBeforeCooldown: num(process.env.BAI_FAILURES_BEFORE_COOLDOWN, 3),
     cooldownMs: num(process.env.BAI_KEY_COOLDOWN_MS, 60_000),

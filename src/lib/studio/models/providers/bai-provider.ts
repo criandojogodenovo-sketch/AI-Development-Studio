@@ -41,7 +41,9 @@ export class BAIProvider implements LLMProvider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
-    const baseUrl = (process.env.BAI_BASE_URL ?? STUDIO_CONFIG.bai.baseUrl).replace(/\/+$/, '')
+    // envStr não exportado do config — normaliza aqui: vazia/nula → default
+    const rawBase = (process.env.BAI_BASE_URL ?? '').trim()
+    const baseUrl = (rawBase || STUDIO_CONFIG.bai.baseUrl).replace(/\/+$/, '')
     const endpoint = `${baseUrl}/chat/completions`
     const timeoutMs = STUDIO_CONFIG.models.requestTimeoutMs
     const started = Date.now()
