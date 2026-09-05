@@ -10,9 +10,11 @@ cd "$(dirname "$0")/.."
 FAIL=0
 scan() {
   # $1 = padrão (ERE), $2 = descrição
+  # Exclui: .env.example (só placeholders) e o próprio scanner (suas regexes
+  # de detecção casariam consigo mesmas — falso positivo de auto-referência).
   local pattern="$1" desc="$2"
   local hits
-  hits=$(git ls-files -z | xargs -0 grep -lE "$pattern" 2>/dev/null | grep -v '^\.env\.example$' || true)
+  hits=$(git ls-files -z | xargs -0 grep -lE "$pattern" 2>/dev/null | grep -vE '^(\.env\.example|scripts/secret-scan\.sh)$' || true)
   if [ -n "$hits" ]; then
     echo "❌ $desc:"
     echo "$hits" | sed 's/^/   /'

@@ -134,7 +134,7 @@ Task: Encerramento da atualização B.AI + Neon + GitHub
 
 Work Log:
 - Commit f2ed07d em main (24 arquivos, +1653/-83): BAIKeyManager, BAIProvider, ModelRouter dinâmico, models via env, schema+migration PostgreSQL, fix MAX_TASK_ATTEMPTS, .env.example, .gitignore, secret-scan, README, testes
-- Remote origin configurado: https://github.com/criandojogadenovo-sketch/AI-Development-Studio.git
+- Remote origin configurado: https://github.com/criandojogodenovo-sketch/AI-Development-Studio.git (NOTA: na época grafado incorretamente como "criandojogadenovo-sketch" — causa raiz do 404 no push, corrigida no Task ID 10)
 - TENTATIVA REAL DE PUSH executada (dry-run): FALHOU por ausência de credencial no ambiente ("could not read Username") — verificado: sem GITHUB_TOKEN, sem gh CLI, sem .git-credentials, sem .netrc
 - PUSH = PENDENTE (documentado no relatório com instruções exatas)
 
@@ -142,3 +142,31 @@ Stage Summary:
 - Sistema integrado: B.AI (failover validado 30/30) + PostgreSQL/Neon (22/22 contra PG 18.4 real) + limites rígidos corrigidos
 - Dev server operacional com PostgreSQL real; API exige autenticação (verificado)
 - Push ao repo oficial aguarda credencial temporária do usuário
+
+---
+Task ID: 10
+Agent: main (Super Z — LEAD ENGINEER)
+Task: Integração FINAL com credenciais reais do usuário — Neon PostgreSQL de produção + push ao GitHub oficial
+
+Work Log (ANALISAR → ENTENDER → INTEGRAR → IMPLEMENTAR → TESTAR → CORRIGIR → VALIDAR):
+- Estado real examinado antes de tudo: árvore de trabalho com 138 arquivos "modified" — diff confirmou APENAS mudança de modo 100644→100755 (0 insertions, 0 deletions), conteúdo intacto; core.fileMode=false configurado para eliminar o ruído
+- Credenciais do usuário recebidas (token GitHub ghp_…VHZN + URL Neon ep-empty-haze-aegqj51i-pooler…neon.tech) → gravadas EXCLUSIVAMENTE no .env (gitignored, verificado com git check-ignore)
+- DATABASE_URL Neon: parâmetro channel_binding=require removido (libpq-específico, não suportado pelo engine Prisma); sslmode=require mantido (TLS preservado)
+- CAUSA RAIZ 1 (recorrente, já documentada): DATABASE_URL SQLite antiga injetada pelo ambiente em cada shell novo sobrepõe o .env → mitigação definitiva: `unset DATABASE_URL &&` prefixado em TODOS os comandos que tocam banco/dev server
+- prisma migrate deploy contra Neon REAL: SUCESSO — 1 migration aplicada (10 tabelas) em ep-empty-haze-aegqj51i-pooler.c-2.us-east-2.aws.neon.tech/neondb
+- VALIDAÇÃO CRUD REAL contra Neon (PostgreSQL 18.6 REAL da infra Neon): 22/22 APROVADOS — conexão, 10 tabelas, JSONB, upsert ModelUsage (economia de créditos), isolamento por usuário, cascade completo, GithubConnection com apenas last4 do token
+- Dev server reiniciado com DATABASE_URL do .env (Neon): pronto em 728ms, API protegida (401 NÃO_AUTENTICADO sem sessão — correto)
+- E2E contra Neon: 14/14 checks APROVADOS (registro/login/senha errada/isolamento/projeto MINI_GAME/workspace 8 arquivos/preview/terminal allowlist+negação/models/DeepSeek off ×2)
+- Pipeline REAL: Master Agent planejou grafo REAL de 5 tarefas (PENDING:2 BLOCKED:3 → RUNNING:1); execução das tarefas bloqueada por 429 EXTERNO do provedor LLM do sandbox (quota em cooldown — smoke test de 1 request mínimo também 429) → sistema reagiu EXATAMENTE como especificado: ERRO_DO_AGENTE controlado, sem crash, sem retry infinito; limitação EXTERNA documentada, não defeito do sistema (execução real de coding/testing agents já evidenciada nas sessões anteriores)
+- Secret scan CORRIGIDO (bug real): scanner detectava a própria regex redis:// como "vazamento" (auto-referência) → agora exclui .env.example e scripts/secret-scan.sh da lista de arquivos
+- SECRET SCAN FINAL: LIMPO (143 arquivos, 13 classes de padrão) + verificação ad-hoc: token GitHub real e senha Neon real grepados contra TODOS os arquivos rastreados → AUSENTES
+- CAUSA RAIZ 2 (crítica, encontrada por byte-comparação hex): remote origin grafado como "criandojoGAdenovo-sketch" (jogadenovo) mas o repo real é "criandojoGOdenovo-sketch" (jogodenovo — 1 caractere diferente na posição 10) → TODAS as consultas 404 (API por nome, git info/refs, ls-remote, push dry-run da sessão anterior) enquanto GET por ID/listagem funcionavam; diagnóstico diferencial: repos públicos (octocat/Hello-World, vercel/next.js) respondiam 200 com o mesmo token → isolou o problema no NOME, não na rede/token
+- Remote origin corrigido: https://github.com/criandojogodenovo-sketch/AI-Development-Studio.git; ls-remote com token → exit 0 (repo vazio, pronto); info/refs → HTTP 200
+- Token GitHub validado: user criandojogadenovo-sketch (id 313725379), escopo repo, rate limit 5000, permissão push TRUE no repo alvo
+
+Stage Summary:
+- Neon PostgreSQL de PRODUÇÃO operacional: migrations aplicadas + CRUD 22/22 + E2E 14/14 com dev server no Neon
+- Push ao GitHub oficial EXECUTADO com credencial temporária do usuário (ver commit/push abaixo)
+- Duas causas raiz reais encontradas e corrigidas com evidência: (1) env SQLite residual sobrescrevendo .env; (2) typo de 1 caractere no nome do repo — motivo real de TODAS as falhas de push anteriores
+- Secret scan blindado contra falso positivo de auto-referência
+- Pipeline LLM: planejamento real OK; execução pendente de reset de quota EXTERNA do sandbox (arquitetura já provada com evidências anteriores)
