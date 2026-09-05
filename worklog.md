@@ -325,3 +325,24 @@ Stage Summary:
 - DEPLOY 100% FUNCIONAL: boot validado, Neon conectando, auth real funcionando em produção
 - Correção recomendada (AGUARDANDO AUTORIZAÇÃO, sem código): definir WORKSPACES_ROOT=/tmp/workspaces no dashboard da Vercel (único FS gravável das Functions; caminho absoluto) + redeploy — ressalva honesta: /tmp é efêmero por instância lambda (persistência de workspaces é questão arquitetural futura, fora do escopo)
 - Zero commits, zero push, zero código alterado nesta tarefa
+
+---
+Task ID: 17
+Agent: main (Super Z — LEAD ENGINEER)
+Task: CORRIGIR WORKSPACES_ROOT na Vercel (/tmp/workspaces) + redeploy + smoke tests completos
+
+Work Log (PATCH ENV → REDEPLOYAR → TESTAR → DIAGNOSTICAR):
+- PATCH /v10/projects/prj_JlAHgua53UYdAnmDhaLykQSeg0CW/env/Lorf1yu0xlBsZgdK (WORKSPACES_ROOT) → HTTP 200; target preservado production+preview; updatedAt 1788616236284→1788634326529; valor=/tmp/workspaces (não-secret, nunca ecoado do response; evidência em .zscripts/vercel-diag/env-patch-workspaces.json)
+- NENHUMA outra variável tocada (DATABASE_URL/BAI/AUTH_SECRET/modelos intactos); zero código, zero commit
+- REDEPLOY via CLI (vercel redeploy dpl_MRxYVKCygDH9x6dFx9er6WE6QPRS): NOVO deployment dpl_3vdPv8mNNFaiamTjQtr4rZwJ5JdP → READY (~1 min); sha 9218216195eb80254b6220e4b10d54dec8f2f5b8 (código inalterado); aliases gamma/mad-ae04/git-main preservados; errorCode/errorMessage vazios
+- SMOKE TESTS REAIS (gamma, usuário de teste dedicado smoke17.1788634497@studio-test.local): GET / 200 SPA; /api/models sem sessão 401 controlado; register 200; login 200; /api/auth/me 200; /api/models autenticado 200 (4 modelos; DeepSeek off); **POST /api/projects 201 — ENOENT ELIMINADO** (projeto add776f1c79f95dd criado; workspace real em /tmp/workspaces com .gitkeep/README.md/package.json); GET /api/projects 200 (lista ok); GET /api/projects/:id 200 (árvore ok); POST /api/files 200 (cria notes/smoke-test.md); GET /api/files 200 (lê de volta, conteúdo íntegro)
+- RUN REAL: POST /api/projects/:id/run → 202; pipeline.started emitido; status→PLANNING; PORÉM 7+ min depois: status AINDA PLANNING, 0 agentRuns, 2 eventos apenas — sem pipeline.failed, sem erro em runtime logs
+- DIAGNÓSTICO (sem alterações às cegas — causa capturada): promise fire-and-forget do runPipeline (route.ts:44, sem await/waitUntil/after) NÃO sobrevive ao fim da invocação serverless — Vercel suspende a função após o 202; o timeout AbortController de 180s (bai-provider.ts:46/config.ts:34) NUNCA disparou (3× o prazo vencido) → event loop da invocação parado = freeze confirmado, não lentidão nem falha da BAI; /api/agents e /api/models não fazem chamada LLM (único caminho de modelo é o run) → chamada LML real INCOMPLETÁVEL via config; exige mudança de código (after() do next/server ou waitUntil) — FORA DE ESCOPO (regra: nenhum código)
+- RUNTIME LOGS (janela 18:55–19:00, 100 linhas): boot ✅ "Variáveis obrigatórias presentes e válidas" (database postgresql ok, BAI key1+key2 true, deepseek false); ZERO errors/500s/exceptions — 100% info level; observado USO REAL PARALELO de outro usuário (login/register/projeto próprio 4bf3d825e55918c5 + run às 18:58:32) funcionando
+- Artefatos deixados (evidência em produção): usuário de teste + projeto add776f1c79f95dd (PLANNING — bloqueia novo run nele pelo guard PIPELINE_JÁ_ATIVO; deletável via Studio UI)
+- GIT: zero commits/push meus; remote main = 9218216 inalterado; HEAD local = 9218216 + 2 auto-commits do harness (e052d43/9c16b6b/1aeff8d/05e250b — apenas worklog.md, sem código)
+
+Stage Summary:
+- WORKSPACES_ROOT RESOLVIDO: criação de projeto/arquivos 100% funcional em produção (todos os smoke tests de API PASS, 11/11)
+- Chamada real de modelo NÃO concluída: pipeline congela pós-resposta em serverless (limitação arquitetural do fire-and-forget, NÃO de config; correção exige código — aguarda autorização)
+- Deploy íntegro: dpl_3vdPv8mNNFaiamTjQtr4rZwJ5JdP READY, zero 500s, boot validado, uso real paralelo confirmado
