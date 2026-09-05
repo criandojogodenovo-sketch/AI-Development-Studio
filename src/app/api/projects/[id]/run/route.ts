@@ -83,7 +83,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       await emitEvent({
         type: 'pipeline.failed',
         projectId: id,
-        message: `Pipeline falhou: ${(e as Error).message}`,
+        message: `Pipeline não concluído — verifique as tarefas para detalhes`,
+        data: { error: (e as Error).message.slice(0, 300) },
       })
       await db.project.update({ where: { id }, data: { status: 'FAILED' } }).catch(() => {})
     }

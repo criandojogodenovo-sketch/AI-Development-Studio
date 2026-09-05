@@ -82,7 +82,7 @@ export async function POST(req: Request) {
     await emitEvent({
       type: 'project.created',
       projectId,
-      message: `Projeto criado: ${name} (${type}) com ${fileCount} arquivos`,
+      message: `Projeto criado: ${name} (${TEMPLATES[type]?.label ?? type}) com ${fileCount} arquivos`,
       data: { type, fileCount },
     })
     return NextResponse.json({ project: { id: project.id, name: project.name, type: project.type } }, { status: 201 })

@@ -329,7 +329,7 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
         type: 'limits.reached',
         projectId: req.projectId,
         taskId: freshTask.id,
-        message: `MAX_TASK_ATTEMPTS (${freshTask.maxAttempts}) excedido para "${freshTask.title}" — tarefa interrompida com diagnóstico`,
+        message: `"${freshTask.title}" interrompida após ${freshTask.maxAttempts} tentativas — estado preservado para diagnóstico`,
       })
       continue
     }
@@ -342,7 +342,7 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineSummary
         type: 'limits.reached',
         projectId: req.projectId,
         taskId: freshTask.id,
-        message: 'Rate limit do provedor LLM — aguardando 60s antes de nova tentativa',
+        message: 'Limite de uso do serviço de IA atingido — aguardando 60s antes de nova tentativa',
       })
       await new Promise((r) => setTimeout(r, 60_000))
     }

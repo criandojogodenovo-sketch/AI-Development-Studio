@@ -421,13 +421,16 @@ export class AgentRunner {
     } catch (err) {
       status = 'FAILED'
       finalResult = `ERRO_DO_AGENTE: ${(err as Error).message}`
+      // Evento em linguagem de produto; o detalhe técnico fica registrado
+      // no resultado da tarefa (área apropriada de diagnóstico)
       await emitEvent({
         type: 'agent.failed',
         projectId: this.input.projectId,
         taskId: this.input.taskId,
         runId: this.runId,
         agent: agent.id,
-        message: `Falha: ${(err as Error).message}`,
+        message: 'Não foi possível concluir esta etapa — abra a tarefa para ver os detalhes',
+        data: { error: (err as Error).message.slice(0, 300) },
       })
     }
 
