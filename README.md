@@ -69,7 +69,7 @@ workspaces/<projectId>/       # 1 workspace isolado por projeto
 | Review/QA | Hy3 (`HY3_MODEL`) | ativo |
 | Fallback difícil | DeepSeek-V4-Flash (`DEEPSEEK_MODEL`) | **DESATIVADO** (`ENABLE_DEEPSEEK=false`) |
 
-Todos os modelos são acessados por um **chain de providers** definido pela versão do Poskli (`POSKLI_VERSION`):
+Todos os modelos são acessados por um **chain de providers** definido pela versão do Poskli (`POSKLI_VERSION` — ou pelo **seletor de modelos** da UI, que envia `poskliVersion` por requisição e sobrepõe a env):
 
 | Versão | Chain |
 |---|---|
@@ -77,6 +77,10 @@ Todos os modelos são acessados por um **chain de providers** definido pela vers
 | 0.2 (default) | B.AI → NVIDIA |
 | 0.3.1 | B.AI → NVIDIA → Experiential (tarefas difíceis) |
 | 1.0-flash | NVIDIA → Experiential → B.AI (reserva) |
+| expposkli-1.0 | **Experiential exclusivo** — master `gpt-6-astra` (fallback interno `aion-2.0`), coding `claude-fable-5.1`, review `aion-2.0` |
+| expposkli-1.1 | **Experiential exclusivo** — master `claude-fable-5.1` (fallback interno `gpt-6-astra`), coding `aion-2.0`, review `aion-2.0` |
+
+Versões `expposkli-*`: o chain contém **apenas** a Experiential — failover para NVIDIA/B.AI é impossível por construção; se um modelo falhar (após o retry interno com o modelo alternativo), o erro é propagado com honestidade. Sem `EXPLABS_API_KEY`, o chain fica vazio (erro controlado).
 
 - **B.AI** (`BAI_API_KEY_1`/`BAI_API_KEY_2`) com **BAIKeyManager** — failover controlado:
 
@@ -87,7 +91,9 @@ Todos os modelos são acessados por um **chain de providers** definido pela vers
 - logs apenas com índice da chave e classe do erro — **a chave nunca aparece em logs, UI, código ou mensagens a modelos**.
 
 - **NVIDIA** (`NVIDIA_API_KEY`, NIM OpenAI-compatible): master `nvidia/nemotron-3-super-120b-a12b`, coding `deepseek-ai/deepseek-v4-flash-0731`, review `openai/gpt-oss-20b` (ids validados ao vivo contra `/v1/models`).
-- **Experiential Labs** (`EXPLABS_API_KEY`): master `gpt-6-astra` (com retry regional para `claude-fable-5.1`), coding/review `claude-fable-5.1`.
+- **Experiential Labs** (`EXPLABS_API_KEY`): master `gpt-6-astra` (com retry regional para `claude-fable-5.1`), coding/review `claude-fable-5.1`; nas versões `expposkli-*`, modelos por papel conforme a tabela acima (fallback interno da própria Experiential).
+
+**Seletor de modelos (UI)**: no Command Center (painel do Poskli), um dropdown com as 6 versões. A escolha é persistida em `localStorage` (`poskli-version`) e enviada ao backend no corpo (`poskliVersion`) e header (`x-poskli-version`) das chamadas Poskli; o backend valida contra `POSKLI_VERSIONS` e envelopa o run (AsyncLocalStorage) — **requisição > env `POSKLI_VERSION`**, que segue como default quando nada é enviado. Valor inválido explícito → `400` honesto.
 
 Failover entre providers (ProviderChain — `src/lib/studio/models/chain.ts`): falhas **elegíveis** (rede/5xx/timeout/401-403) avançam no chain; **429 nunca**; `CLIENT_ERROR`/`UNKNOWN` não avançam (conservador). Sem chaves B.AI no sandbox, o SDK local (`z-ai`) substitui o B.AI — a arquitetura de agentes não muda.
 
