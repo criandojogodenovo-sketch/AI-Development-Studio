@@ -35,7 +35,6 @@ export const SERVER_ONLY_VARS = [
   'BAI_API_KEY_1',
   'BAI_API_KEY_2',
   'NVIDIA_API_KEY',
-  'EXPLABS_API_KEY',
   'GITHUB_TOKEN',
   'GITHUB_CLIENT_ID',
   'GITHUB_CLIENT_SECRET',
@@ -229,35 +228,26 @@ export function validateEnvironment(nodeEnv?: string): EnvValidationResult {
     }
   }
 
-  // ---------- 10b. CHAIN DE PROVIDERS (POSKLI_VERSION + NVIDIA + EXPLABS) ----------
+  // ---------- 10b. CHAIN DE PROVIDERS (POSKLI_VERSION + NVIDIA) ----------
   // Consumidor: chain.ts / ModelRouter (roteamento por versão do Poskli)
   // Whitelist espelha POSKLI_VERSIONS de chain.ts (o seletor de modelos
   // da UI valida contra a MESMA lista em runtime).
-  const POSKLI_VERSION_WHITELIST = ['0.1', '0.2', '0.3.1', '1.0-flash', 'expposkli-1.0', 'expposkli-1.1']
+  // Experiential Labs: ELIMINADA (Tarefa C) — nenhuma env EXPLABS_* é
+  // reconhecida ou consumida pelo código.
+  const POSKLI_VERSION_WHITELIST = ['0.1', '0.2', '0.3.1', '1.0-flash', 'superagent']
   const chainVersion = (process.env.POSKLI_VERSION ?? '').trim()
   if (chainVersion && !POSKLI_VERSION_WHITELIST.includes(chainVersion)) {
     errors.push(issue('error', 'POSKLI_VERSION', 'chain.ts / ModelRouter (roteamento de providers)',
       `valor "${chainVersion.slice(0, 12)}" inválido — esperado ${POSKLI_VERSION_WHITELIST.join(' | ')} (default 0.2).`))
   }
   const nvKey = (process.env.NVIDIA_API_KEY ?? '').trim()
-  const xlKey = (process.env.EXPLABS_API_KEY ?? '').trim()
   const activeVer = chainVersion || '0.2'
-  const isExpposkli = activeVer.startsWith('expposkli-')
-  if (!nvKey && !isExpposkli && ['0.2', '0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
+  if (!nvKey && ['0.2', '0.3.1', '1.0-flash', 'superagent'].includes(activeVer) && isProd) {
     warnings.push(issue('warn', 'NVIDIA_API_KEY', 'NVIDIAProvider (chain do ModelRouter)',
       `ausente em produção com POSKLI_VERSION=${activeVer} — o chain seguirá sem o provider NVIDIA (failover adicional indisponível).`))
   }
-  if (!xlKey && isExpposkli && isProd) {
-    warnings.push(issue('error', 'EXPLABS_API_KEY', 'ExperientialProvider (chain do ModelRouter)',
-      `ausente em produção com POSKLI_VERSION=${activeVer} — versão EXCLUSIVA Experiential: nenhum outro provider será usado e o chain fica VAZIO (runs falharão com erro honesto).`))
-  }
-  if (!xlKey && !isExpposkli && ['0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
-    warnings.push(issue('warn', 'EXPLABS_API_KEY', 'ExperientialProvider (chain do ModelRouter)',
-      `ausente em produção com POSKLI_VERSION=${activeVer} — o chain seguirá sem o provider Experiential.`))
-  }
   for (const [name, consumer] of [
     ['NVIDIA_BASE_URL', 'NVIDIAProvider (endpoint)'],
-    ['EXPLABS_BASE_URL', 'ExperientialProvider (endpoint)'],
   ] as const) {
     const raw = (process.env[name] ?? '').trim()
     if (raw && !/^https:\/\//.test(raw)) {
@@ -268,10 +258,7 @@ export function validateEnvironment(nodeEnv?: string): EnvValidationResult {
     ['NVIDIA_MODEL_MASTER', 'ModelRouter (master/nvidia)'],
     ['NVIDIA_MODEL_CODING', 'ModelRouter (coding/nvidia)'],
     ['NVIDIA_MODEL_REVIEW', 'ModelRouter (review/nvidia)'],
-    ['EXPLABS_MODEL_MASTER', 'ModelRouter (master/explabs)'],
-    ['EXPLABS_MODEL_MASTER_FALLBACK', 'ExperientialProvider (fallback regional)'],
-    ['EXPLABS_MODEL_CODING', 'ModelRouter (coding/explabs)'],
-    ['EXPLABS_MODEL_REVIEW', 'ModelRouter (review/explabs)'],
+    ['LUNA_MODEL', 'ModelRouter (fallback de review — B.AI)'],
   ] as const) {
     const raw = (process.env[name] ?? '').trim()
     if (raw && /\s/.test(raw)) {
@@ -311,13 +298,11 @@ export function environmentSummary(): Record<string, unknown> {
   const k2 = (process.env.BAI_API_KEY_2 ?? '').trim()
   const gh = (process.env.GITHUB_TOKEN ?? '').trim()
   const nv = (process.env.NVIDIA_API_KEY ?? '').trim()
-  const xl = (process.env.EXPLABS_API_KEY ?? '').trim()
   return {
     nodeEnv: process.env.NODE_ENV ?? '(unset)',
     database: POSTGRES_URL_RE.test((process.env.DATABASE_URL ?? '').trim()) ? 'postgresql ok' : 'INVÁLIDA/AUSENTE',
     baiKeys: { key1: Boolean(k1), key2: Boolean(k2), provider: k1 || k2 ? 'bai' : 'zai-sandbox' },
     nvidiaKey: nv ? `configurada (…${nv.slice(-4)})` : 'não configurada',
-    explabsKey: xl ? `configurada (…${xl.slice(-4)})` : 'não configurada',
     poskliVersion: (process.env.POSKLI_VERSION ?? '0.2').trim() || '0.2',
     githubToken: gh ? `configurado (…${gh.slice(-4)})` : 'não configurado',
     deepseekEnabled: (process.env.ENABLE_DEEPSEEK ?? 'false') === 'true',

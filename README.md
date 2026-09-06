@@ -71,16 +71,27 @@ workspaces/<projectId>/       # 1 workspace isolado por projeto
 
 Todos os modelos são acessados por um **chain de providers** definido pela versão do Poskli (`POSKLI_VERSION` — ou pelo **seletor de modelos** da UI, que envia `poskliVersion` por requisição e sobrepõe a env):
 
-| Versão | Chain |
-|---|---|
-| 0.1 | B.AI |
-| 0.2 (default) | B.AI → NVIDIA |
-| 0.3.1 | B.AI → NVIDIA → Experiential (tarefas difíceis) |
-| 1.0-flash | NVIDIA → Experiential → B.AI (reserva) |
-| expposkli-1.0 | **Experiential exclusivo** — master `gpt-6-astra` (fallback interno `aion-2.0`), coding `claude-fable-5.1`, review `aion-2.0` |
-| expposkli-1.1 | **Experiential exclusivo** — master `claude-fable-5.1` (fallback interno `gpt-6-astra`), coding `aion-2.0`, review `aion-2.0` |
+| Versão | Master | Coding | Review | Comportamento em 429 |
+|---|---|---|---|---|
+| 0.1 | Qwen (B.AI) | Hy3 (B.AI) | Qwen (B.AI) | backoff 5s/10s/20s (máx 3) → `QUOTA_EXHAUSTED` |
+| 0.2 (default) | GLM 5.3 Flash | Qwen 3.8 Flash → DeepSeek V4 (NVIDIA) | Hy3 → GPT-OSS-20B (NVIDIA) | backoff 3 tentativas → `QUOTA_EXHAUSTED` |
+| 0.3.1 | Hy3 (B.AI) | Qwen → **GLM imediato** (mesma conta) | **GPT-OSS-20B (NVIDIA)** → GPT-5.6 Luna (B.AI) | smart-fallback por parada |
+| 1.0-flash | **Nemotron 3 Super (NVIDIA)** | **DeepSeek V4 Flash (NVIDIA)** → Qwen (B.AI) | **GPT-OSS-20B (NVIDIA)** → Luna (B.AI) | NVIDIA: 1 retry (5s) → B.AI reserva |
+| superagent | GLM (B.AI) → Nemotron (NVIDIA) | **Hy3 → Qwen (dupla)** → DeepSeek (NVIDIA) | GPT-OSS-20B (NVIDIA) → Luna (B.AI) | smart-fallback por parada |
 
-Versões `expposkli-*`: o chain contém **apenas** a Experiential — failover para NVIDIA/B.AI é impossível por construção; se um modelo falhar (após o retry interno com o modelo alternativo), o erro é propagado com honestidade. Sem `EXPLABS_API_KEY`, o chain fica vazio (erro controlado).
+**Review principal**: GPT-OSS-20B (NVIDIA) em 0.3.1 / 1.0-flash / superagent; fallback GPT-5.6 Luna (B.AI) apenas se o NVIDIA falhar por quota/região.
+
+**Experiential Labs: ELIMINADA** (Tarefa C) — o provider, env vars (`EXPLABS_*`) e as versões `expposkli-1.0`/`expposkli-1.1` foram removidos por completo do código e da UI.
+
+### Estratégia anti-rate-limit (Tarefa C)
+
+- **Backoff progressivo em 429**: 5s → 10s → 20s (máx 3 tentativas no mesmo modelo). Após a 3ª falha, o run **para imediatamente** com `QUOTA_EXHAUSTED` — honestidade acima de tudo.
+- **NUNCA correções para erros de quota**: `QUOTA_EXHAUSTED` é terminal — o orquestrador aborta o run (estado BLOCKED) sem criar tarefas de correção (economia de tokens).
+- **Fallback inteligente por modelo**: 0.3.1 — Qwen 429 → GLM **imediatamente** (mesma conta B.AI); 1.0-flash — NVIDIA 429 → 1 retry → B.AI como reserva (NVIDIA é prioritário, mas não infinito).
+- **Rotação de chaves B.AI**: apenas em falhas elegíveis (rede/5xx); **429 nunca rotaciona chaves**.
+- **Truncagem de contexto**: outputs de ferramentas (`run_tests`, `run_command`, `read_file`, …) são cortados em **2.000 chars** com o marcador `[Output truncado - 2k chars]` antes de ir ao LLM.
+- **Correções via diff**: o agente de correção recebe apenas o **diff** (linhas alteradas) + erro resumido — nunca o código completo ou o histórico inteiro.
+- **Ciclos de revisão reduzidos**: `MAX_REVIEW_CYCLES` = **1** para tarefas simples, **2** para difíceis (jogos/apps complexas) — derivado do pedido automaticamente.
 
 - **B.AI** (`BAI_API_KEY_1`/`BAI_API_KEY_2`) com **BAIKeyManager** — failover controlado:
 
@@ -91,11 +102,10 @@ Versões `expposkli-*`: o chain contém **apenas** a Experiential — failover p
 - logs apenas com índice da chave e classe do erro — **a chave nunca aparece em logs, UI, código ou mensagens a modelos**.
 
 - **NVIDIA** (`NVIDIA_API_KEY`, NIM OpenAI-compatible): master `nvidia/nemotron-3-super-120b-a12b`, coding `deepseek-ai/deepseek-v4-flash-0731`, review `openai/gpt-oss-20b` (ids validados ao vivo contra `/v1/models`).
-- **Experiential Labs** (`EXPLABS_API_KEY`): master `gpt-6-astra` (com retry regional para `claude-fable-5.1`), coding/review `claude-fable-5.1`; nas versões `expposkli-*`, modelos por papel conforme a tabela acima (fallback interno da própria Experiential).
 
-**Seletor de modelos (UI)**: no Command Center (painel do Poskli), um dropdown com as 6 versões. A escolha é persistida em `localStorage` (`poskli-version`) e enviada ao backend no corpo (`poskliVersion`) e header (`x-poskli-version`) das chamadas Poskli; o backend valida contra `POSKLI_VERSIONS` e envelopa o run (AsyncLocalStorage) — **requisição > env `POSKLI_VERSION`**, que segue como default quando nada é enviado. Valor inválido explícito → `400` honesto.
+**Seletor de modelos (UI)**: no Command Center (painel do Poskli), um dropdown com as 5 versões (**superagent** com badge violeta). A escolha é persistida em `localStorage` (`poskli-version`) e enviada ao backend no corpo (`poskliVersion`) e header (`x-poskli-version`) das chamadas Poskli; o backend valida contra `POSKLI_VERSIONS` e envelopa o run (AsyncLocalStorage) — **requisição > env `POSKLI_VERSION`**, que segue como default quando nada é enviado. Valor inválido explícito → `400` honesto. Valores antigos (ex.: `expposkli-1.0`) são ignorados na leitura do localStorage.
 
-Failover entre providers (ProviderChain — `src/lib/studio/models/chain.ts`): falhas **elegíveis** (rede/5xx/timeout/401-403) avançam no chain; **429 nunca**; `CLIENT_ERROR`/`UNKNOWN` não avançam (conservador). Sem chaves B.AI no sandbox, o SDK local (`z-ai`) substitui o B.AI — a arquitetura de agentes não muda.
+Failover entre providers (ProviderChain — `src/lib/studio/models/chain.ts`): falhas **elegíveis** (rede/5xx/timeout/401-403) avançam no chain; 429 segue a **política anti-rate-limit** por parada (switch-now / retry-then-switch / retry-backoff — ver acima); `CLIENT_ERROR`/`UNKNOWN` não avançam (conservador). Sem chaves B.AI no sandbox, o SDK local (`z-ai`) substitui o B.AI — a arquitetura de agentes não muda.
 
 DeepSeek só é usado se: explicitamente habilitado + problema difícil + modelos gratuitos falharam + limite diário não atingido. O `ModelRouter` bloqueia qualquer uso acidental. O sistema funciona **completamente sem DeepSeek**.
 

@@ -5,7 +5,7 @@
 export type ModelRole = 'master' | 'coding' | 'review' | 'testing' | 'github' | 'deepseek'
 
 /** Providers físicos do sistema (o chain decide a ordem por versão do Poskli). */
-export type ProviderName = 'bai' | 'zai' | 'nvidia' | 'explabs'
+export type ProviderName = 'bai' | 'zai' | 'nvidia'
 
 export interface ModelDefinition {
   id: string            // id lógico — nome no provider primário (B.AI); estável p/ uso/auditoria
@@ -27,13 +27,6 @@ export interface CompletionRequest {
   messages: ChatMessage[]
   temperature?: number
   maxTokens?: number
-  /**
-   * Modelo FÍSICO alternativo do MESMO provider para retry interno
-   * (usado nas versões expposkli-*: fallback Experiential→Experiential).
-   * POLÍTICA: 429/rate limit NUNCA dispara este retry. Providers que
-   * não suportam fallback simplesmente ignoram o campo.
-   */
-  modelFallback?: string
 }
 
 export interface CompletionResult {

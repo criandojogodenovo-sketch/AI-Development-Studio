@@ -28,6 +28,7 @@ import { runAgent, extractJson } from '../agents/base'
 import {
   readProjectMemory, memoryToPrompt, updateProjectMemory, selectRelevantFiles,
 } from '../context/context-manager'
+import { clipToolOutput } from '../context/clip.ts'
 import { createTasksFromPlan, transitionTask, readyTasks } from '../orchestrator/task-graph'
 import { emitEvent } from '../events/bus'
 import { ensureMaterialized, syncBackToDb } from '../workspace/sync'
@@ -110,6 +111,8 @@ interface PoskliContext {
   executions: number
   iteration: number
   maxIterations: number
+  /** Teto de ciclos de correção (Tarefa C §3f): 1 simples / 2 difícil */
+  maxCycles: number
   evidence: string[]
   plan: Plan
   /** Registros com identidade (nunca duplicados por re-render/polling). */
@@ -125,6 +128,49 @@ interface PoskliContext {
 const MAX_TASKS = 8
 const MAX_REVIEW_ATTEMPTS = 2
 const FILE_WRITE_TOOLS = ['create_file', 'modify_file', 'create_directory']
+
+/**
+ * Deriva a dificuldade da tarefa (Tarefa C §3f): tarefas difíceis
+ * (jogos, apps complexas, dashboards, tempo real, muitas tarefas)
+ * ganham 2 ciclos de revisão; simples, 1. Economia de tokens.
+ */
+function deriveDifficulty(request: string, taskCount: number): 'easy' | 'hard' {
+  const hard =
+    /\b(jogo|game|jogos|games|aplicativo|app\b|dashboard|painel|3d|multiplayer|engine|motor\b|plataforma|e-?commerce|loja|chat|tempo real|realtime|sistema completo)\b/i.test(
+      request
+    ) || taskCount > 6
+  return hard ? 'hard' : 'easy'
+}
+
+/** Cota esgotada (Tarefa C §3a): o run PARA honestamente — o catch
+ *  do runPoskliInner deriva o estado final conservador. NUNCA cria
+ *  tarefas de correção para erros de quota (regra de ouro). */
+class QuotaExhaustedAbort extends Error {
+  constructor(detail: string) {
+    super(`QUOTA_EXHAUSTED: ${detail}`)
+    this.name = 'QuotaExhaustedAbort'
+  }
+}
+
+/** Resumo do DIFF do workspace (Tarefa C §3e): correções recebem
+ *  apenas as linhas alteradas + erro resumido — nunca o código completo. */
+async function workspaceDiffSummary(ctx: PoskliContext): Promise<string> {
+  try {
+    const res = await runExecution({
+      projectId: ctx.projectId,
+      command: 'git diff --unified=1 HEAD 2>/dev/null | head -c 6000',
+      userId: ctx.userId,
+      source: 'poskli',
+      trigger: 'diff-summary',
+      timeoutMs: 15_000,
+    })
+    const raw = ((res.stdout ?? '') + (res.stderr ?? '')).trim()
+    if (!raw) return '(sem alterações não commitadas — workspace limpo)'
+    return clipToolOutput(raw)
+  } catch {
+    return '(diff indisponível — workspace sem git ou comando bloqueado)'
+  }
+}
 
 const STATE_LABELS: Record<PoskliState, string> = {
   ANALYZING: 'Analisando',
@@ -452,6 +498,31 @@ async function reviewStage(ctx: PoskliContext): Promise<ReviewResult> {
     // ---- agente falhou: CLASSIFICAR (nunca mascarar) ----
     const classified = classifyError(`${out.error ?? ''} ${out.result}`)
 
+    if (classified.code === 'QUOTA_EXHAUSTED') {
+      // Tarefa C §3a: cota esgotada → revisão BLOCKED + run ABORTADO
+      const blocked: ReviewResult = {
+        status: 'BLOCKED',
+        verdict: 'BLOCKED',
+        blockedReason: 'QUOTA_EXHAUSTED',
+        summary: 'Revisão bloqueada: cota do provedor esgotada (run interrompido para evitar desperdício).',
+        attempts,
+        ts: new Date().toISOString(),
+      }
+      ctx.errorCode = 'QUOTA_EXHAUSTED'
+      ctx.evidence.push('Revisão bloqueada: QUOTA_EXHAUSTED — run interrompido honestamente')
+      await emitEvent({
+        type: 'review.blocked',
+        projectId: ctx.projectId,
+        runId: ctx.runId,
+        agent: 'review',
+        status: 'BLOCKED',
+        message: 'Revisão bloqueada: cota do provedor esgotada — o run será interrompido sem correções automáticas',
+        data: { code: 'QUOTA_EXHAUSTED', attempt },
+      })
+      await db.poskliRun.update({ where: { id: ctx.runId }, data: { reviewResult: blocked as unknown as object } }).catch(() => {})
+      throw new QuotaExhaustedAbort('revisão interrompida por cota esgotada')
+    }
+
     if (classified.code === 'PROVIDER_RATE_LIMIT') {
       // Política: failover NÃO aplicado a rate limits → revisão BLOCKED
       const rl = rateLimitRecord('REVIEWING', attempt, 'key#1', false, 'revisão bloqueada — sem failover para rate limit por política')
@@ -631,6 +702,14 @@ async function applyCorrection(
   } else {
     const classified = classifyError(fix.result)
     await transitionTask(target.id, 'COMPLETED', { result: { output: fix.result.slice(0, 3000), correctedIn: record.attempt } as object })
+    if (classified.code === 'QUOTA_EXHAUSTED') {
+      // Tarefa C §3a: cota esgotada → correção BLOCKED + run ABORTADO
+      // honestamente (nunca nova correção para erro de quota)
+      await finishCorrection(ctx, record, 'BLOCKED', `cota esgotada: ${fix.result.slice(0, 140)}`, 'QUOTA_EXHAUSTED')
+      ctx.errorCode = 'QUOTA_EXHAUSTED'
+      ctx.evidence.push(`Correção ${record.attempt} bloqueada (QUOTA_EXHAUSTED) — run interrompido`)
+      throw new QuotaExhaustedAbort('correção interrompida por cota esgotada')
+    }
     await finishCorrection(ctx, record, classified.code === 'PROVIDER_RATE_LIMIT' ? 'BLOCKED' : 'FAILED', `tentativa falhou: ${fix.result.slice(0, 140)}`, classified.code)
     if (classified.code === 'PROVIDER_RATE_LIMIT') ctx.errorCode = classified.code
     ctx.evidence.push(`Correção ${record.attempt} não concluída (${classified.code})`)
@@ -671,6 +750,8 @@ async function runPoskliInner(runId: string): Promise<void> {
     executions: 0,
     iteration: 0,
     maxIterations: run.maxIterations,
+    // Tarefa C §3f: ciclos de correção por dificuldade (1 simples / 2 difícil)
+    maxCycles: STUDIO_CONFIG.limits.reviewCyclesSimple,
     evidence: [],
     plan: { architecture: '', stack: [], tasks: [] },
     testRecords: [],
@@ -694,6 +775,12 @@ async function runPoskliInner(runId: string): Promise<void> {
     if (!(await setState(ctx, 'PLANNING'))) return
     let totalTasks = 0
     await stage(ctx, 'PLANNING', async () => {
+      // dificuldade da tarefa → teto de ciclos de correção (§3f)
+      const difficulty = deriveDifficulty(ctx.request, ctx.plan.tasks.length)
+      ctx.maxCycles =
+        difficulty === 'hard'
+          ? Math.max(STUDIO_CONFIG.limits.reviewCyclesSimple, STUDIO_CONFIG.limits.maxReviewCycles)
+          : STUDIO_CONFIG.limits.reviewCyclesSimple
       await db.task.updateMany({
         where: { projectId: ctx.projectId, status: { in: ['PENDING', 'BLOCKED', 'FAILED', 'RUNNING'] } },
         data: { status: 'CANCELLED', error: null },
@@ -701,7 +788,7 @@ async function runPoskliInner(runId: string): Promise<void> {
       const ids = await createTasksFromPlan(ctx.projectId, ctx.plan)
       totalTasks = ids.length
       await db.poskliRun.update({ where: { id: runId }, data: { plan: { tasks: ctx.plan.tasks, architecture: ctx.plan.architecture } as object } })
-      return `Grafo pronto: ${totalTasks} tarefa(s)`
+      return `Grafo pronto: ${totalTasks} tarefa(s) · ciclos máx ${ctx.maxCycles} (${difficulty})`
     })
 
     // 3) IMPLEMENTING — Engenheiro executa as tarefas (com retry interno limitado)
@@ -727,6 +814,14 @@ async function runPoskliInner(runId: string): Promise<void> {
           ctx.evidence.push(`✔ ${fresh.title}: ${exec.result.slice(0, 140)}`)
         } else {
           const classified = classifyError(exec.result)
+          if (classified.code === 'QUOTA_EXHAUSTED') {
+            // Tarefa C §3a: cota esgotada → tarefa FAILED + run ABORTADO
+            // honestamente (nunca correção para erro de quota)
+            await transitionTask(fresh.id, 'FAILED', { error: `${classified.friendly} [${classified.code}]` })
+            ctx.errorCode = classified.code
+            ctx.evidence.push(`✘ ${fresh.title}: QUOTA_EXHAUSTED — run interrompido`)
+            throw new QuotaExhaustedAbort('implementação interrompida por cota esgotada')
+          }
           if (classified.code === 'PROVIDER_RATE_LIMIT') {
             // sem retry para rate limit (política) — tarefa FAILED com causa real
             await transitionTask(fresh.id, 'FAILED', { error: `${classified.friendly} [${classified.code}]` })
@@ -756,21 +851,28 @@ async function runPoskliInner(runId: string): Promise<void> {
     let tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'INITIAL'))
     let testPassed = tests.passed
 
-    // 5) CORRECTING ← TESTING (loop limitado por maxIterations — registros reais)
-    while (!testPassed && ctx.iteration < ctx.maxIterations && Date.now() < ctx.deadline - 15_000) {
+    // 5) CORRECTING ← TESTING — loop limitado por maxCycles (Tarefa C
+    // §3f: 1 ciclo p/ simples, 2 p/ difíceis) + orçamento de tempo
+    const cycleBudget = Math.min(ctx.maxIterations, ctx.maxCycles)
+    while (!testPassed && ctx.iteration < cycleBudget && Date.now() < ctx.deadline - 15_000) {
       ctx.iteration++
       if (!(await setState(ctx, 'CORRECTING'))) return
       const record = await startCorrection(ctx, 'TEST_FAILURE')
       await stage(ctx, 'CORRECTING', async () => {
-        const failureHints = extractFailureHints(tests.stdout, tests.stderr)
+        // Tarefa C §3e: correção via DIFF + erro resumido — nunca o código completo
+        const failureHints = clipToolOutput(extractFailureHints(tests.stdout, tests.stderr))
+        const diff = await workspaceDiffSummary(ctx)
         await applyCorrection(ctx, record, async () =>
           [
-            '## FALHA REAL DOS TESTES (Execution Engine — saída do comando)',
+            '## FALHA DOS TESTES (resumo)',
             `Comando: ${tests.command}`,
             '',
             failureHints,
             '',
-            'Corrija o código para que os testes passem. LEIA os arquivos citados antes de editar.',
+            '## DIFF DO ESTADO ATUAL (linhas alteradas)',
+            diff,
+            '',
+            'Corrija APENAS as linhas que causam a falha: use modify_file com trechos pequenos (searchText/replaceText). NÃO reescreva arquivos inteiros nem reenvie código completo.',
           ].join('\n')
         )
         const rec = ctx.corrections.find((c) => c.id === record.id)
@@ -788,18 +890,28 @@ async function runPoskliInner(runId: string): Promise<void> {
     ctx.review = await stage(ctx, 'REVIEWING', () => reviewStage(ctx))
     await db.poskliRun.update({ where: { id: runId }, data: { reviewResult: ctx.review as unknown as object } }).catch(() => {})
 
-    // Revisor pediu mudanças → correção registrada (se houver orçamento)
+    // Revisor pediu mudanças → correção registrada (se houver orçamento
+    // de ciclos — Tarefa C §3f) e via DIFF (§3e)
     if (
       ctx.review.status === 'CHANGES_REQUESTED' &&
       Date.now() < ctx.deadline - 40_000 &&
-      ctx.iteration < ctx.maxIterations
+      ctx.iteration < cycleBudget
     ) {
       ctx.iteration++
       if (await setState(ctx, 'CORRECTING')) {
         const record = await startCorrection(ctx, 'REVIEW_CHANGES')
         await stage(ctx, 'CORRECTING', async () => {
+          const diff = await workspaceDiffSummary(ctx)
           await applyCorrection(ctx, record, async () =>
-            `## REVISÃO SOLICITOU MUDANÇAS\n${(ctx.review.summary ?? '').slice(0, 700)}\n\nAplique as correções apontadas.`
+            [
+              '## REVISÃO SOLICITOU MUDANÇAS (resumo)',
+              (ctx.review.summary ?? '').slice(0, 400),
+              '',
+              '## DIFF DO ESTADO ATUAL (linhas alteradas)',
+              diff,
+              '',
+              'Aplique APENAS as correções apontadas (modify_file com trechos pequenos). NÃO reescreva arquivos inteiros.',
+            ].join('\n')
           )
           const rec = ctx.corrections.find((c) => c.id === record.id)
           return rec ? `Correção pós-revisão #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`

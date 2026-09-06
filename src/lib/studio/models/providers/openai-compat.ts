@@ -1,12 +1,13 @@
 // ============================================================
 // OPENAI-COMPATIBLE PROVIDER BASE — infraestrutura HTTP
-// compartilhada (NVIDIA NIM, Experiential Labs). A B.AI mantém o
-// BAIProvider dedicado (failover interno de 2 chaves).
+// compartilhada (NVIDIA NIM). A B.AI mantém o BAIProvider
+// dedicado (failover interno de 2 chaves).
 //
 // - Server-side ONLY — a chave NUNCA é registrada/logada/exposta.
 // - Erros classificados (errorClass anexado) para o ProviderChain.
 // - Timeout por request (AbortController); 1 tentativa HTTP por
-//   chamada — o chain decide o failover (economia de créditos).
+//   chamada — o chain decide o failover e a política anti-rate-limit
+//   (backoff/smart-fallback/QUOTA_EXHAUSTED no chain.ts).
 // - Modelos de raciocínio (nemotron/gpt-oss/deepseek na NIM):
 //   content null + finish=length = truncamento válido (content '');
 //   quando o provider entrega a saída em reasoning_content sem
@@ -26,7 +27,7 @@ export interface OpenAICompatChatResponse {
 }
 
 export interface OpenAICompatOptions {
-  /** nome estável do provider (logs/chain — ex: nvidia, explabs) */
+  /** nome estável do provider (logs/chain — ex: nvidia) */
   name: string
   /** env var que contém a chave (lida no construtor — nunca exportada) */
   apiKeyEnv: string

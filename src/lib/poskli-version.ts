@@ -7,6 +7,11 @@
 // todas as chamadas que envolvem o Poskli; o backend valida contra a
 // lista server-side (chain.ts) — a env POSKLI_VERSION continua como
 // fallback quando nada é enviado.
+//
+// Tarefa C: Experiential ELIMINADA — expposkli-1.0/1.1 removidas;
+// nova versão superagent (badge violeta) com dupla de coding.
+// Valores antigos persistidos no localStorage (ex.: "expposkli-1.0")
+// são ignorados na leitura (voltam ao default da env).
 // ============================================================
 
 export const POSKLI_VERSION_STORAGE_KEY = 'poskli-version'
@@ -19,56 +24,54 @@ export interface PoskliVersionOption {
   detail: string
   /** descrição longa (tooltip/legenda) */
   description: string
-  /** true = Experiential exclusivo (badge violeta) */
-  explabsExclusive: boolean
+  /** true = destaque (badge violeta) — superagent */
+  highlight: boolean
 }
 
 export const POSKLI_VERSION_OPTIONS: readonly PoskliVersionOption[] = [
   {
     value: '0.1',
     short: '0.1 · legado B.AI',
-    detail: 'apenas B.AI',
-    description: 'Versão legada — apenas o gateway B.AI (GLM/Qwen/Hy3).',
-    explabsExclusive: false,
+    detail: 'Qwen · Hy3 (só B.AI)',
+    description:
+      'Versão legada — apenas B.AI: master Qwen, coding Hy3, review Qwen. Sem failover externo.',
+    highlight: false,
   },
   {
     value: '0.2',
     short: '0.2 · B.AI + NVIDIA',
     detail: 'B.AI → NVIDIA (padrão)',
-    description: 'B.AI prioritário com failover para NVIDIA (429 nunca faz failover).',
-    explabsExclusive: false,
+    description:
+      'Master GLM, coding Qwen, review Hy3 — NVIDIA como fallback de coding/review em falhas elegíveis.',
+    highlight: false,
   },
   {
     value: '0.3.1',
-    short: '0.3.1 · 3 providers',
-    detail: 'B.AI → NVIDIA → Experiential',
-    description: 'B.AI → NVIDIA, com Experiential somente em tarefas difíceis.',
-    explabsExclusive: false,
+    short: '0.3.1 · review NVIDIA',
+    detail: 'Hy3 · Qwen→GLM · GPT-OSS',
+    description:
+      'Master Hy3, coding Qwen (GLM imediato em 429 — mesma conta), review GPT-OSS-20B (NVIDIA) com reserva GPT-5.6 Luna.',
+    highlight: false,
   },
   {
     value: '1.0-flash',
     short: '1.0 Flash · NVIDIA',
-    detail: 'NVIDIA prioritário → Experiential → B.AI',
-    description: 'NVIDIA prioritário; Experiential no meio; B.AI como reserva.',
-    explabsExclusive: false,
+    detail: 'NVIDIA prioritário → B.AI',
+    description:
+      'NVIDIA prioritário: master Nemotron, coding DeepSeek V4 Flash, review GPT-OSS-20B. 429 → 1 retry → B.AI como reserva.',
+    highlight: false,
   },
   {
-    value: 'expposkli-1.0',
-    short: 'expposkli-1.0 · Experiential',
-    detail: 'Experiential exclusivo',
-    description: 'Exclusivo Experiential: gpt-6-astra (fallback aion-2.0), claude-fable-5.1, aion-2.0.',
-    explabsExclusive: true,
-  },
-  {
-    value: 'expposkli-1.1',
-    short: 'expposkli-1.1 · Experiential',
-    detail: 'Experiential exclusivo',
-    description: 'Exclusivo Experiential: claude-fable-5.1 (fallback gpt-6-astra), aion-2.0, aion-2.0.',
-    explabsExclusive: true,
+    value: 'superagent',
+    short: 'superagent',
+    detail: 'GLM · Hy3+Qwen · GPT-OSS',
+    description:
+      'Superagente: master GLM, coding DUPLA (Hy3 → Qwen em 429 → DeepSeek NVIDIA), review GPT-OSS-20B (NVIDIA) com reserva Luna.',
+    highlight: true,
   },
 ] as const
 
-/** Lê a versão persistida (localStorage); null se nunca escolheu. */
+/** Lê a versão persistida (localStorage); null se nunca escolheu/inválida. */
 export function readStoredPoskliVersion(): string | null {
   if (typeof window === 'undefined') return null
   const v = (localStorage.getItem(POSKLI_VERSION_STORAGE_KEY) ?? '').trim()

@@ -11,6 +11,10 @@ import path from 'path'
 import { STUDIO_CONFIG } from '../config'
 import { db } from '@/lib/db'
 
+// re-export p/ compat (importadores históricos) — Tarefa C §3d:
+// truncagem de outputs de ferramenta em 2k chars com marcador
+export { clipToolOutput, clipTestOutput } from './clip.ts'
+
 const IGNORED_FILES = new Set([
   'package-lock.json', 'bun.lock', 'bun.lockb', 'yarn.lock', 'pnpm-lock.yaml',
   '.DS_Store', 'README.md', '.gitkeep',
@@ -114,12 +118,7 @@ export function compressHistory(steps: Array<{ thought?: string; action?: string
   return { summary: `RESUMO DOS PASSOS ANTERIORES:\n${summary}`, recent }
 }
 
-/** Trunca saída de testes para o contexto do agente. */
-export function clipTestOutput(output: string): string {
-  const max = STUDIO_CONFIG.context.maxTestOutputChars
-  if (output.length <= max) return output
-  return output.slice(0, max) + `\n...[SAÍDA TRUNCADA — ${output.length} chars totais]`
-}
+// (clipTestOutput/clipToolOutput estão re-exportadas de ./clip.ts no topo)
 
 // ============================================================
 // PROJECT MEMORY — memória estruturada por projeto

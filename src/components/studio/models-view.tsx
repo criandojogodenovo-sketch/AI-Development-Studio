@@ -77,7 +77,11 @@ export function ModelsView() {
   const totals = data.totalsToday ?? { requests: 0, totalTokens: 0, errors: 0 }
   const chainVersion: string | undefined = data.chain?.version
   const chainProviders: string[] = data.chain?.providers ?? []
-  const exclusive = poskliVersionOption(chainVersion ?? '')?.explabsExclusive ?? false
+  const routes: Record<string, string[]> = data.routes ?? {}
+  const highlight = poskliVersionOption(chainVersion ?? '')?.highlight ?? false
+
+  const routeLabel = (r?: string[]) =>
+    r && r.length ? r.map((s) => s.split(':')[1]).join(' → ') : ''
 
   return (
     <div className="space-y-4">
@@ -88,7 +92,7 @@ export function ModelsView() {
             variant="outline"
             title={`Cadeia de providers: ${chainProviders.join(' → ')}`}
             className={`text-[10px] ${
-              exclusive
+              highlight
                 ? 'bg-violet-500/15 text-violet-300 border-violet-500/30'
                 : 'bg-sky-500/10 text-sky-300 border-sky-500/30'
             }`}
@@ -100,7 +104,14 @@ export function ModelsView() {
       {chainProviders.length > 0 && (
         <p className="text-[11px] text-zinc-500 -mt-3">
           Cadeia ativa nesta versão: <span className="font-mono text-zinc-400">{chainProviders.join(' → ')}</span>
-          {exclusive && ' — Experiential exclusivo (sem failover externo)'}
+          {highlight && ' — superagent (dupla de coding Hy3+Qwen)'}
+        </p>
+      )}
+      {routes.master && (
+        <p className="text-[11px] text-zinc-500 -mt-2">
+          Rotas: master <span className="font-mono text-zinc-400">{routeLabel(routes.master)}</span> · coding{' '}
+          <span className="font-mono text-zinc-400">{routeLabel(routes.coding)}</span> · review{' '}
+          <span className="font-mono text-zinc-400">{routeLabel(routes.review)}</span>
         </p>
       )}
 

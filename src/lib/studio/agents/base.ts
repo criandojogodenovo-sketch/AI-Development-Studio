@@ -13,6 +13,7 @@ import { runTool, getTool, toolsForPermissions } from '../tools'
 import { toolToSchema, type ToolCtx } from '../tools/types'
 import { emitEvent } from '../events/bus'
 import { compressHistory } from '../context/context-manager'
+import { clipToolOutput } from '../context/clip.ts'
 
 /** Nome de produto do agente para mensagens de evento (server-side). */
 function agentDisplayName(agentId: string): string {
@@ -243,7 +244,7 @@ export class AgentRunner {
             role: 'assistant',
             content: JSON.stringify({ thought: (s.thought ?? '').slice(0, 200), action: { tool: s.tool, args: s.args } }).slice(0, 1200),
           })
-          conversation.push({ role: 'user', content: `[OBSERVAÇÃO] ${s.observation ?? ''}`.slice(0, 1500) })
+          conversation.push({ role: 'user', content: `[OBSERVAÇÃO] ${s.observation ?? ''}`.slice(0, 2100) })
         }
         // Re-educação NÃO-acumulativa: lembrança fixa quando há erros de protocolo
         if (this.protocolErrors > 0) {
@@ -380,7 +381,9 @@ export class AgentRunner {
         let ok: boolean
         try {
           const res = await runTool(String(toolName), toolArgs, ctx)
-          observation = res.output
+          // Tarefa C §3d: outputs de ferramentas (run_tests/run_command/
+          // read_file/…) truncados em 2k chars ANTES de irem ao LLM
+          observation = clipToolOutput(res.output)
           ok = res.ok
           if (toolName === 'read_file' && typeof toolArgs.path === 'string') {
             this.readCache.set(toolArgs.path, this.steps.length + 1)

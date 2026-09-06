@@ -479,3 +479,44 @@ Stage Summary:
 - Política 429-nunca preservada em todas as camadas (chaves BAI, providers, chain)
 - Neon limpo: 1 usuário real, 1 projeto, cascades verificadas; segredo preservado (chaves só em .secrets local e env vars da Vercel; grep anti-leak limpo)
 - Deploy via push (integração GitHub) com env vars já configuradas; smoke pós-READY na sequência
+
+---
+
+## Tarefa C — Reorganização dos modelos + anti-rate-limit + eliminação Experiential (2026-09-07)
+
+**Contexto**: Experiential Labs causava loops de 429, desperdício de tokens (146k/run) e bloqueios. Eliminada por completo.
+
+### 1. Novo mapa de versões (chain.ts VERSION_ROUTES + router.ts)
+- `0.1`: master Qwen · coding Hy3 · review Qwen (B.AI puro)
+- `0.2`: master GLM · coding Qwen→DeepSeek(NVIDIA) · review Hy3→GPT-OSS(NVIDIA)
+- `0.3.1`: master Hy3 · coding Qwen→GLM(429=switch-now) · review GPT-OSS(NVIDIA)→Luna
+- `1.0-flash`: NVIDIA prioritário (Nemotron/DeepSeek/GPT-OSS; 429=retry-then-switch) → B.AI reserva
+- `superagent`: master GLM→Nemotron · coding Hy3→Qwen→DeepSeek (dupla) · review GPT-OSS→Luna
+- Review principal: GPT-OSS-20B (NVIDIA) em 0.3.1/1.0-flash/superagent; fallback GPT-5.6 Luna (B.AI) (LUNA_MODEL)
+
+### 2. Experiential eliminada 100%
+- `providers/experiential.ts` APAGADO; ProviderName = bai|zai|nvidia
+- expposkli-1.0/1.1 removidas de chain/router/seletor/env-validator/.env.example/README
+- localStorage antigo (expposkli-*) é ignorado na leitura
+
+### 3. Anti-rate-limit (chain.ts executeWithChain)
+- 429 → backoff 5s/10s/20s, máx 3 tentativas → `QUOTA_EXHAUSTED` (PARA o run)
+- switch-now (B.AI mesma conta) / retry-then-switch (NVIDIA 1 retry → B.AI)
+- QUOTA_EXHAUSTED: orquestrador aborta run (BLOCKED), NUNCA cria correção de quota
+- Truncagem: clipToolOutput (context/clip.ts) 2k chars + "[Output truncado - 2k chars]" em AgentRunner
+- Correções via `git diff --unified=1` (workspaceDiffSummary) + erro resumido
+- MAX_REVIEW_CYCLES: 1 simples / 2 difícil (deriveDifficulty por keywords/tarefas)
+
+### 4. UI
+- Seletor: 0.1 / 0.2 / 0.3.1 / 1.0-flash / superagent (badge violeta)
+- Badge errorCode QUOTA_EXHAUSTED → "cota esgotada"; models-view mostra rotas por papel
+
+### 5. Testes: 113/113 (chain 38 · state-machine 41 · openai-compat 10 · version-context 5 · errors 5)
+- C5: backoff 3x→QUOTA_EXHAUSTED; C5.3 Qwen 429→GLM imediato; C5.4 NVIDIA 429→1 retry→B.AI
+- C11: superagent dupla Hy3+Qwen; C9: zero explabs; C12: truncagem 2k
+- package.json `test` → node --test tests/*.test.ts (suíte completa)
+
+### 6. Validação
+- tsc: zero erros novos (12 pré-existentes documentados; ignoreBuildErrors já ativo)
+- eslint: limpo nos ficheiros alterados (public/monaco/** adicionado ao ignores — OOM)
+- next build: OK (todas as rotas)

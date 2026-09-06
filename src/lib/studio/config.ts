@@ -39,6 +39,9 @@ export const STUDIO_CONFIG = {
     review: envStr(process.env.HY3_MODEL, process.env.MODEL_REVIEW) ?? 'hy3',
     // DeepSeek → emergência/fallback OPCIONAL
     deepseek: envStr(process.env.DEEPSEEK_MODEL) ?? 'deepseek-v4-flash',
+    // GPT-5.6 Luna → fallback de REVIEW (B.AI) quando o NVIDIA falha
+    // por quota/região (versões 0.3.1 / 1.0-flash / superagent)
+    luna: envStr(process.env.LUNA_MODEL) ?? 'gpt-5.6-luna',
     // DeepSeek DESATIVADO POR PADRÃO — somente fallback configurável.
     // O sistema funciona COMPLETAMENTE sem DeepSeek.
     enableDeepseek: bool(process.env.ENABLE_DEEPSEEK, false),
@@ -57,12 +60,14 @@ export const STUDIO_CONFIG = {
 
   // ---------- ROUTER — chain de providers por versão do Poskli ----------
   router: {
-    // 0.1 | 0.2 | 0.3.1 | 1.0-flash (default: 0.2 — versão em produção)
-    //   0.1       : B.AI
-    //   0.2       : B.AI → NVIDIA
-    //   0.3.1     : B.AI → NVIDIA → EXPLABS (somente tarefas difíceis)
-    //   1.0-flash : NVIDIA → EXPLABS → B.AI (reserva)
-    // 429/rate limit NUNCA faz failover (política inviolável).
+    // 0.1 | 0.2 | 0.3.1 | 1.0-flash | superagent (default: 0.2)
+    //   0.1        : B.AI (Qwen/Hy3)
+    //   0.2        : B.AI → NVIDIA
+    //   0.3.1      : B.AI → NVIDIA (review GPT-OSS-20B)
+    //   1.0-flash  : NVIDIA → B.AI (reserva)
+    //   superagent : B.AI (dupla coding Hy3+Qwen) → NVIDIA
+    // Política anti-rate-limit: ver chain.ts (backoff 5s/10s/20s,
+    // máx 3 tentativas, QUOTA_EXHAUSTED para o run honestamente).
     poskliVersion: envStr(process.env.POSKLI_VERSION) ?? '0.2',
   },
 
@@ -71,16 +76,14 @@ export const STUDIO_CONFIG = {
     baseUrl: envStr(process.env.NVIDIA_BASE_URL) ?? 'https://integrate.api.nvidia.com/v1',
   },
 
-  // ---------- EXPERIENTIAL LABS (EXPLABS — provider adicional) ----------
-  explabs: {
-    baseUrl: envStr(process.env.EXPLABS_BASE_URL) ?? 'https://api.experientiallabs.ai/v1',
-  },
-
   // ---------- LIMITES DO LOOP (nunca loop infinito) ----------
   limits: {
     maxAgentSteps: num(process.env.AGENT_MAX_STEPS, 30),
     maxTaskAttempts: num(process.env.AGENT_MAX_RETRIES, 3),
-    maxReviewCycles: num(process.env.MAX_REVIEW_CYCLES, 5),
+    // Ciclos de revisão/correção: 1 p/ tarefas simples, 2 p/ difíceis
+    // (Tarefa C §3f — evita queimar tokens em ciclos infinitos)
+    maxReviewCycles: num(process.env.MAX_REVIEW_CYCLES, 2),
+    reviewCyclesSimple: num(process.env.MAX_REVIEW_CYCLES_SIMPLE, 1),
     maxToolCalls: num(process.env.MAX_TOOL_CALLS, 60),
     maxTotalExecutionMs: num(process.env.MAX_TOTAL_EXECUTION_TIME, 900_000), // 15 min
     // Detecção de loop: mesma assinatura de erro+ação repetida N vezes
@@ -129,12 +132,15 @@ export const STUDIO_CONFIG = {
     maxEventDataChars: 4000,
   },
 
-  // ---------- CONTEXTO (economia de tokens) ----------
+  // ---------- CONTEXTO (economia de tokens — Tarefa C §3d) ----------
   context: {
     maxFilesInContext: num(process.env.CONTEXT_MAX_FILES, 12),
     maxFileCharsInContext: num(process.env.CONTEXT_MAX_FILE_CHARS, 6000),
     maxHistorySteps: num(process.env.CONTEXT_MAX_HISTORY_STEPS, 10),
-    maxTestOutputChars: num(process.env.CONTEXT_MAX_TEST_OUTPUT_CHARS, 3000),
+    // Outputs de ferramentas (run_tests/run_command/read_file) → 2.000
+    // chars antes de ir ao LLM (prefixo "[Output truncado - 2k chars]")
+    maxToolOutputChars: num(process.env.CONTEXT_MAX_TOOL_OUTPUT_CHARS, 2000),
+    maxTestOutputChars: num(process.env.CONTEXT_MAX_TEST_OUTPUT_CHARS, 2000),
   },
 } as const
 

@@ -10,13 +10,12 @@
 //   P5.  Modelos de raciocínio: content null + finish=length → ''
 //        content null + reasoning_content → uso defensivo
 //   P6.  SEGURANÇA: chave nunca aparece em mensagens de erro
-//   P7.  Experiential: retry regional do master (403 → fallback)
+//   P7.  REMOVIDO: Experiential Labs eliminada (Tarefa C) — provider apagado
 // ============================================================
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { OpenAICompatProvider } from '../src/lib/studio/models/providers/openai-compat.ts'
-import { ExperientialProvider, EXPLABS_MODEL_CATALOG } from '../src/lib/studio/models/providers/experiential.ts'
 import type { ChatMessage } from '../src/lib/studio/models/types.ts'
 
 const MSGS: ChatMessage[] = [{ role: 'user', content: 'ping' }]
@@ -204,160 +203,4 @@ test('P6.1 — a chave NUNCA aparece em mensagens de erro', async () => {
     assert.ok(!msg.includes(KEY), 'mensagem de erro não pode conter a chave')
     assert.ok(!String((e as { cause?: unknown }).cause ?? '').includes(KEY))
   }
-})
-
-// ---------- P7: Experiential — retry regional do master ----------
-
-test('P7.1 — master gpt-6-astra com 403 (bloqueio regional) → retry com fallback e sucesso', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  const calls: string[] = []
-  mockFetch(async (_url, init) => {
-    const body = JSON.parse(String(init?.body ?? '{}')) as { model: string }
-    calls.push(body.model)
-    if (calls.length === 1) {
-      return jsonRes({ error: { message: 'model unavailable from location', code: 'model_location_not_supported' } }, 403)
-    }
-    return jsonRes(okBody('resposta-do-fallback'))
-  })
-  const r = await prov.complete({ model: EXPLABS_MODEL_CATALOG.master, messages: MSGS })
-  assert.deepEqual(calls, [EXPLABS_MODEL_CATALOG.master, EXPLABS_MODEL_CATALOG.masterFallback])
-  assert.equal(r.content, 'resposta-do-fallback')
-  assert.equal(r.model, EXPLABS_MODEL_CATALOG.masterFallback)
-})
-
-test('P7.2 — modelo NÃO-master com 403: sem retry interno (chain decide)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  let calls = 0
-  mockFetch(async () => {
-    calls++
-    return jsonRes({ error: { message: 'unavailable from location' } }, 403)
-  })
-  await assert.rejects(
-    prov.complete({ model: EXPLABS_MODEL_CATALOG.coding, messages: MSGS }),
-    (e: Error & { errorClass?: string }) => e.errorClass === 'AUTH'
-  )
-  assert.equal(calls, 1, 'coding não tem retry regional')
-})
-
-test('P7.3 — master 403 e fallback TAMBÉM falha → erro propagado (2 chamadas)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  let calls = 0
-  mockFetch(async () => {
-    calls++
-    return jsonRes({ error: { message: 'unavailable from location' } }, 403)
-  })
-  await assert.rejects(
-    prov.complete({ model: EXPLABS_MODEL_CATALOG.master, messages: MSGS }),
-    (e: Error & { errorClass?: string }) => e.errorClass === 'AUTH'
-  )
-  assert.equal(calls, 2)
-})
-
-test('P7.4 — master com falha de REDE: sem retry de modelo (não é bloqueio regional)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  let calls = 0
-  mockFetch(async () => {
-    calls++
-    throw new TypeError('fetch failed')
-  })
-  await assert.rejects(
-    prov.complete({ model: EXPLABS_MODEL_CATALOG.master, messages: MSGS }),
-    (e: Error & { errorClass?: string }) => e.errorClass === 'NETWORK'
-  )
-  assert.equal(calls, 1, 'falha de rede não dispara retry de modelo')
-})
-
-// ---------- P8: modelFallback EXPLÍCITO (versões expposkli-1.0/1.1) ----------
-// Caminho (A): o ModelRouter injeta req.modelFallback — retry interno
-// Experiential→Experiential para classes elegíveis; 429 NUNCA.
-
-test('P8.1 — modelFallback explícito + 403 (bloqueio regional): retry com o modelo alternativo e sucesso', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  const calls: string[] = []
-  mockFetch(async (_url, init) => {
-    const body = JSON.parse(String(init?.body ?? '{}')) as { model: string }
-    calls.push(body.model)
-    if (calls.length === 1) {
-      return jsonRes({ error: { message: 'model unavailable from location' } }, 403)
-    }
-    return jsonRes(okBody('resposta-do-alternativo'))
-  })
-  const r = await prov.complete({ model: 'gpt-6-astra', messages: MSGS, modelFallback: 'aion-2.0' })
-  assert.deepEqual(calls, ['gpt-6-astra', 'aion-2.0'])
-  assert.equal(r.content, 'resposta-do-alternativo')
-  assert.equal(r.model, 'aion-2.0')
-})
-
-test('P8.2 — modelFallback explícito + 500 (elegível): retry (diferente do legado, que não re-tenta)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  const calls: string[] = []
-  mockFetch(async (_url, init) => {
-    const body = JSON.parse(String(init?.body ?? '{}')) as { model: string }
-    calls.push(body.model)
-    if (calls.length === 1) return jsonRes({ error: { message: 'internal' } }, 500)
-    return jsonRes(okBody('ok-apos-500'))
-  })
-  const r = await prov.complete({ model: 'claude-fable-5.1', messages: MSGS, modelFallback: 'aion-2.0' })
-  assert.deepEqual(calls, ['claude-fable-5.1', 'aion-2.0'])
-  assert.equal(r.content, 'ok-apos-500')
-})
-
-test('P8.3 — modelFallback explícito + 429: NUNCA retry (política inviolável)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  let calls = 0
-  mockFetch(async () => {
-    calls++
-    return jsonRes({ error: { message: 'rate limit exceeded' } }, 429)
-  })
-  await assert.rejects(
-    prov.complete({ model: 'aion-2.0', messages: MSGS, modelFallback: 'claude-fable-5.1' }),
-    (e: Error & { errorClass?: string }) => e.errorClass === 'RATE_LIMIT'
-  )
-  assert.equal(calls, 1, '429 nunca dispara retry de modelo (nem explícito)')
-})
-
-test('P8.4 — modelFallback explícito e o fallback TAMBÉM falha: erro propagado (2 chamadas, honesto)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  let calls = 0
-  mockFetch(async () => {
-    calls++
-    return jsonRes({ error: { message: 'unavailable' } }, 503)
-  })
-  await assert.rejects(
-    prov.complete({ model: 'gpt-6-astra', messages: MSGS, modelFallback: 'aion-2.0' }),
-    (e: Error & { errorClass?: string }) => e.errorClass === 'SERVER_ERROR'
-  )
-  assert.equal(calls, 2)
-})
-
-test('P8.5 — sem modelFallback explícito, 500 no master: SEM retry (legado preservado)', async () => {
-  process.env.EXPLABS_API_KEY = KEY
-  const prov = new ExperientialProvider()
-  delete process.env.EXPLABS_API_KEY
-  let calls = 0
-  mockFetch(async () => {
-    calls++
-    return jsonRes({ error: { message: 'internal' } }, 500)
-  })
-  await assert.rejects(
-    prov.complete({ model: EXPLABS_MODEL_CATALOG.master, messages: MSGS }),
-    (e: Error & { errorClass?: string }) => e.errorClass === 'SERVER_ERROR'
-  )
-  assert.equal(calls, 1, 'legado: 500 não é bloqueio regional — sem retry')
 })

@@ -4,11 +4,11 @@
 // Todo erro do pipeline é CLASSIFICADO — nunca mascarado:
 //   catch (error) { status = "success" }  ← PROIBIDO
 //
-// Taxonomia (spec §31):
-//   PROVIDER_RATE_LIMIT | PROVIDER_TIMEOUT | PROVIDER_ERROR |
-//   TOOL_FAILURE | COMMAND_FAILURE | BUILD_FAILURE | TEST_FAILURE |
-//   IMPLEMENTATION_FAILURE | VALIDATION_FAILURE | WORKSPACE_FAILURE |
-//   BUDGET_TIMEOUT | CANCELLED | UNKNOWN_FAILURE
+// Taxonomia (spec §31 + Tarefa C — QUOTA_EXHAUSTED):
+//   PROVIDER_RATE_LIMIT | QUOTA_EXHAUSTED | PROVIDER_TIMEOUT |
+//   PROVIDER_ERROR | TOOL_FAILURE | COMMAND_FAILURE | BUILD_FAILURE |
+//   TEST_FAILURE | IMPLEMENTATION_FAILURE | VALIDATION_FAILURE |
+//   WORKSPACE_FAILURE | BUDGET_TIMEOUT | CANCELLED | UNKNOWN_FAILURE
 //
 // ZERO imports — puro, determinístico, testável isoladamente.
 // Mensagens nunca expõem keys/tokens (o provider já mascara; aqui
@@ -17,6 +17,7 @@
 
 export type PoskliErrorCode =
   | 'PROVIDER_RATE_LIMIT'
+  | 'QUOTA_EXHAUSTED'
   | 'PROVIDER_TIMEOUT'
   | 'PROVIDER_ERROR'
   | 'TOOL_FAILURE'
@@ -57,6 +58,17 @@ export function classifyError(err: unknown): ClassifiedError {
   const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
   const msg = raw
   const detail = safeDetail(raw || 'erro sem mensagem')
+
+  // ---- QUOTA_EXHAUSTED (Tarefa C: 3x 429 com backoff — run PARADO
+  // honestamente; JAMAIS cria correções para erro de quota) ----
+  if (/QUOTA_EXHAUSTED/i.test(msg) || /quota[ _-]?exhausted/i.test(msg)) {
+    return {
+      code: 'QUOTA_EXHAUSTED',
+      friendly: 'Cota do provedor de IA esgotada — o run foi interrompido para evitar desperdício de tokens.',
+      retryable: false, // política: parar honestamente, sem loops de correção
+      detail,
+    }
+  }
 
   // ---- rate limit (política: failover NÃO aplicado; jamais vira sucesso) ----
   if (

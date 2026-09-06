@@ -348,7 +348,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
               variant="outline"
               title={poskliVersionOption(version)?.description ?? version}
               className={`scale-[0.8] shrink-0 ${
-                poskliVersionOption(version)?.explabsExclusive
+                poskliVersionOption(version)?.highlight
                   ? 'bg-violet-500/15 text-violet-300 border-violet-500/30'
                   : 'bg-sky-500/10 text-sky-300 border-sky-500/30'
               }`}
@@ -363,7 +363,11 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
           )}
           {run?.errorCode && !isActive && (
             <Badge variant="outline" className="bg-orange-500/15 text-orange-400 border-orange-500/30 scale-[0.85]">
-              {run.errorCode === 'PROVIDER_RATE_LIMIT' ? 'limite do provedor' : 'erro classificado'}
+              {run.errorCode === 'QUOTA_EXHAUSTED'
+                ? 'cota esgotada'
+                : run.errorCode === 'PROVIDER_RATE_LIMIT'
+                  ? 'limite do provedor'
+                  : 'erro classificado'}
             </Badge>
           )}
           {isActive && (
@@ -392,7 +396,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
               {POSKLI_VERSION_OPTIONS.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value} className="text-[11px] py-1.5 focus:bg-zinc-800">
                   <span className="flex items-center gap-2">
-                    <span className={opt.explabsExclusive ? 'text-violet-300' : 'text-zinc-200'}>{opt.short}</span>
+                    <span className={opt.highlight ? 'text-violet-300' : 'text-zinc-200'}>{opt.short}</span>
                     <span className="text-zinc-500">{opt.detail}</span>
                   </span>
                 </SelectItem>

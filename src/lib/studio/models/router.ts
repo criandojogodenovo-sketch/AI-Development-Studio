@@ -1,30 +1,25 @@
 // ============================================================
-// MODEL ROUTER — coração do roteamento de modelos
-// Regras:
-//   1. GLM-5.3-Flash    → MASTER/ORCHESTRATOR
-//   2. Qwen3.8-Flash    → CODING
-//   3. Hy3              → REVIEW/QA
-//   4. DeepSeek-V4-Flash → DESATIVADO POR PADRÃO (ENABLE_DEEPSEEK=false)
-//      Somente se: explicitamente habilitado + problema difícil +
-//      modelos gratuitos falharam + limites diários permitirem.
+// MODEL ROUTER — coração do roteamento de modelos (Tarefa C)
 //
-// PROVIDERS FÍSICOS — chain por versão do Poskli (POSKLI_VERSION
-// ou parâmetro poskliVersion da requisição — seletor de modelos da UI):
-//   0.1          : B.AI
-//   0.2          : B.AI → NVIDIA
-//   0.3.1        : B.AI → NVIDIA → EXPLABS (somente tarefas difíceis)
-//   1.0-flash    : NVIDIA → EXPLABS → B.AI (reserva)
-//   expposkli-1.0: EXPLABS EXCLUSIVO (master gpt-6-astra→aion-2.0,
-//                  coding claude-fable-5.1, review aion-2.0)
-//   expposkli-1.1: EXPLABS EXCLUSIVO (master claude-fable-5.1,
-//                  coding aion-2.0, review aion-2.0)
-// Sem chaves B.AI (sandbox): SDK local (zai) substitui o B.AI.
-// Versões expposkli-*: fallback APENAS dentro da Experiential —
-// NUNCA NVIDIA/B.AI (exclusividade por construção do chain).
+// ROTAS POR VERSÃO × PAPEL (VERSION_ROUTES do chain.ts):
+//   0.1        : master Qwen · coding Hy3 · review Qwen (B.AI puro)
+//   0.2        : master GLM · coding Qwen→DeepSeek(NV) ·
+//                review Hy3→GPT-OSS(NV)
+//   0.3.1      : master Hy3 · coding Qwen→GLM(429) ·
+//                review GPT-OSS(NV)→Luna(B.AI)
+//   1.0-flash  : NVIDIA prioritário (Nemotron/DeepSeek/GPT-OSS) →
+//                B.AI reserva (429 → 1 retry → troca)
+//   superagent : master GLM→Nemotron · coding Hy3→Qwen→DeepSeek ·
+//                review GPT-OSS(NV)→Luna
 //
-// POLÍTICA INVARIÁVEL: 429/rate limit NUNCA faz failover (nem entre
-// chaves B.AI, nem entre providers). Falhas elegíveis (rede/5xx/
-// timeout/401-403) avançam no chain — 1 tentativa por provider.
+// EXPERIENTIAL LABS: ELIMINADA (Tarefa C §2) — nenhum import,
+// provider, env var ou versão a referencia. ProviderNames
+// válidos: bai | zai (sandbox) | nvidia.
+//
+// POLÍTICA ANTI-RATE-LIMIT (chain.ts): 429 → backoff 5s/10s/20s
+// (máx 3 tentativas) → QUOTA_EXHAUSTED para o RUN honestamente;
+// fallback inteligente por parada (switch-now / retry-then-switch).
+// Falhas elegíveis (rede/5xx/timeout/401-403) avançam no chain.
 // Uso registrado por modelo LÓGICO (ModelUsage) — rastreabilidade.
 // ============================================================
 
@@ -33,17 +28,18 @@ import { STUDIO_CONFIG } from '../config'
 import { BAIProvider } from './providers/bai-provider'
 import { ZAIProvider } from './providers/zai-provider'
 import { NVIDIAProvider, NVIDIA_MODEL_CATALOG } from './providers/nvidia.ts'
-import { ExperientialProvider, EXPLABS_MODEL_CATALOG } from './providers/experiential.ts'
 import {
   executeWithChain,
-  isExpposkliVersion,
   normalizeVersion,
   resolveChain,
+  VERSION_ROUTES,
   type ChainContext,
   type ChainEntry,
   type Difficulty,
+  type LogicalModelKey,
   type PoskliVersion,
   type ProviderName,
+  type RouteRole,
 } from './chain'
 import { requestPoskliVersion } from './version-context.ts'
 import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, ModelRole } from './types'
@@ -51,13 +47,24 @@ import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, Model
 // ---------- REGISTRO DE MODELOS LÓGICOS ----------
 // O id lógico é o nome no provider PRIMÁRIO (B.AI) e permanece
 // estável para uso/auditoria (ModelUsage, UI). Cada entrada mapeia
-// o modelo FÍSICO de cada provider — o chain decide qual usar em
-// tempo de execução.
+// o modelo FÍSICO de cada provider — a ROTA da versão decide qual
+// usar em tempo de execução.
 
 function baiKeysPresent(): boolean {
   const k1 = (process.env.BAI_API_KEY_1 ?? '').trim()
   const k2 = (process.env.BAI_API_KEY_2 ?? '').trim()
   return Boolean(k1 || k2)
+}
+
+/** Chaves lógicas (VERSION_ROUTES) → id do registro (env-configurável). */
+const LOGICAL_TO_REGISTRY: Record<LogicalModelKey, string> = {
+  glm: STUDIO_CONFIG.models.master,
+  qwen: STUDIO_CONFIG.models.coding,
+  hy3: STUDIO_CONFIG.models.review,
+  deepseek: STUDIO_CONFIG.models.deepseek,
+  luna: STUDIO_CONFIG.models.luna,
+  'gpt-oss': 'gpt-oss-20b',
+  nemotron: 'nemotron-3-super',
 }
 
 function buildRegistry(): ModelDefinition[] {
@@ -67,12 +74,10 @@ function buildRegistry(): ModelDefinition[] {
       label: 'GLM-5.3-Flash',
       role: 'master',
       enabledByDefault: true,
-      description: 'Master Agent / Orquestrador — análise, planejamento, decisões',
+      description: 'Master/Orquestrador — análise, planejamento, decisões (B.AI). Master nas versões 0.2/superagent e reserva da 1.0-flash.',
       physical: {
         bai: STUDIO_CONFIG.models.master,
         zai: STUDIO_CONFIG.models.master,
-        nvidia: NVIDIA_MODEL_CATALOG.master,
-        explabs: EXPLABS_MODEL_CATALOG.master,
       },
     },
     {
@@ -80,12 +85,10 @@ function buildRegistry(): ModelDefinition[] {
       label: 'Qwen3.8-Flash',
       role: 'coding',
       enabledByDefault: true,
-      description: 'Coding Agent — implementação de código e correções',
+      description: 'Coding Agent — implementação e correções (B.AI). Coding na 0.2/0.3.1/1.0-flash e 2ª parada da superagent.',
       physical: {
         bai: STUDIO_CONFIG.models.coding,
         zai: STUDIO_CONFIG.models.coding,
-        nvidia: NVIDIA_MODEL_CATALOG.coding,
-        explabs: EXPLABS_MODEL_CATALOG.coding,
       },
     },
     {
@@ -93,55 +96,59 @@ function buildRegistry(): ModelDefinition[] {
       label: 'Hy3',
       role: 'review',
       enabledByDefault: true,
-      description: 'Review/QA — revisão de código, qualidade, segurança',
+      description: 'Review/QA via B.AI — review na 0.2, coding na 0.1/superagent, master na 0.3.1.',
       physical: {
         bai: STUDIO_CONFIG.models.review,
         zai: STUDIO_CONFIG.models.review,
-        nvidia: NVIDIA_MODEL_CATALOG.review,
-        explabs: EXPLABS_MODEL_CATALOG.review,
       },
     },
     {
       id: STUDIO_CONFIG.models.deepseek,
       label: 'DeepSeek-V4-Flash',
       role: 'deepseek',
-      enabledByDefault: false, // DESATIVADO POR PADRÃO — regra de negócio
-      description: 'Fallback para problemas difíceis. Requer ENABLE_DEEPSEEK=true.',
+      enabledByDefault: false, // DESATIVADO POR PADRÃO como papel; ativo como parada NVIDIA
+      description: 'Coding pela NVIDIA NIM (deepseek-v4-flash) — parada de coding em 0.2/1.0-flash/superagent; papel emergência B.AI requer ENABLE_DEEPSEEK.',
       physical: {
         bai: STUDIO_CONFIG.models.deepseek,
         zai: STUDIO_CONFIG.models.deepseek,
+        nvidia: NVIDIA_MODEL_CATALOG.coding,
+      },
+    },
+    {
+      id: STUDIO_CONFIG.models.luna,
+      label: 'GPT-5.6-Luna',
+      role: 'review',
+      enabledByDefault: true,
+      description: 'Fallback de REVIEW (B.AI) quando o NVIDIA falha por quota/região — versões 0.3.1 / 1.0-flash / superagent.',
+      physical: {
+        bai: STUDIO_CONFIG.models.luna,
+        zai: STUDIO_CONFIG.models.luna,
+      },
+    },
+    {
+      id: 'gpt-oss-20b',
+      label: 'GPT-OSS-20B (NVIDIA)',
+      role: 'review',
+      enabledByDefault: true,
+      description: 'Review PRINCIPAL pela NVIDIA NIM — versões 0.3.1 / 1.0-flash / superagent.',
+      physical: {
+        nvidia: NVIDIA_MODEL_CATALOG.review,
+      },
+    },
+    {
+      id: 'nemotron-3-super',
+      label: 'Nemotron-3-Super (NVIDIA)',
+      role: 'master',
+      enabledByDefault: true,
+      description: 'Master pela NVIDIA NIM — prioritário na 1.0-flash, reserva da superagent.',
+      physical: {
+        nvidia: NVIDIA_MODEL_CATALOG.master,
       },
     },
   ]
 }
 
 export const MODEL_REGISTRY: ModelDefinition[] = buildRegistry()
-
-// ---------- VERSÕES EXCLUSIVAS EXPLABS (expposkli-1.0 / 1.1) ----------
-// Modelos FÍSICOS por papel nestas versões (spec do produto) — ids
-// validados ao vivo em 2026-09-06. O modelFallback é o retry interno
-// Experiential→Experiential (bloqueio regional/falha elegível); 429
-// NUNCA dispara retry. Falha do par → erro honesto propagado.
-
-export interface ExpposkliRoleModels {
-  model: string
-  fallback: string
-}
-
-const EXPLABS_EXCLUSIVE_MODELS: Record<'expposkli-1.0' | 'expposkli-1.1', Record<'master' | 'coding' | 'review', ExpposkliRoleModels>> = {
-  'expposkli-1.0': {
-    // master: gpt-6-astra (se bloqueado por região → aion-2.0)
-    master: { model: EXPLABS_MODEL_CATALOG.master, fallback: 'aion-2.0' },
-    coding: { model: 'claude-fable-5.1', fallback: 'aion-2.0' },
-    review: { model: 'aion-2.0', fallback: 'claude-fable-5.1' },
-  },
-  'expposkli-1.1': {
-    // master: claude-fable-5.1 (gpt-6-astra como alternativa)
-    master: { model: 'claude-fable-5.1', fallback: EXPLABS_MODEL_CATALOG.master },
-    coding: { model: 'aion-2.0', fallback: 'claude-fable-5.1' },
-    review: { model: 'aion-2.0', fallback: 'claude-fable-5.1' },
-  },
-}
 
 export class ModelRouter {
   private providers: Record<string, LLMProvider>
@@ -151,7 +158,6 @@ export class ModelRouter {
       bai: new BAIProvider(),
       zai: new ZAIProvider(),
       nvidia: new NVIDIAProvider(),
-      explabs: new ExperientialProvider(),
     }
   }
 
@@ -166,9 +172,8 @@ export class ModelRouter {
     this.lastCallAt = Date.now()
   }
 
-  // ---------- CHAIN (providers físicos por versão do Poskli) ----------
+  // ---------- VERSÃO ATIVA (seletor da UI — ALS > env) ----------
 
-  /** Versão ativa: parâmetro DA REQUISIÇÃO (seletor da UI — ALS) > env. */
   private activeVersion(): PoskliVersion {
     return requestPoskliVersion() ?? normalizeVersion(STUDIO_CONFIG.router.poskliVersion)
   }
@@ -177,62 +182,75 @@ export class ModelRouter {
     return {
       baiConfigured: baiKeysPresent(),
       nvidiaConfigured: (this.providers.nvidia as NVIDIAProvider).isConfigured(),
-      explabsConfigured: (this.providers.explabs as ExperientialProvider).isConfigured(),
       difficulty,
     }
   }
 
-  /** Entradas do chain (provider + modelo físico) para um modelo lógico.
-   *  Versões expposkli-*: modelo físico e fallback VÊM DA VERSÃO —
-   *  não do catálogo global (override por papel). */
-  private entriesFor(
-    def: ModelDefinition,
+  /** Paradas da rota (provider + modelo físico) para um papel na versão ativa.
+   *  Sandbox sem chaves B.AI: zai substitui o bai; sem NVIDIA: paradas
+   *  nvidia são omitidas (rota encurta honestamente). */
+  private routeEntries(
+    role: RouteRole,
     difficulty?: Difficulty
-  ): { entries: ChainEntry[]; version: PoskliVersion; chain: ProviderName[] } {
+  ): { entries: ChainEntry[]; version: PoskliVersion } {
     const version = this.activeVersion()
-    const chain = resolveChain(version, this.chainContext(difficulty))
-    const exclusive = isExpposkliVersion(version) ? EXPLABS_EXCLUSIVE_MODELS[version] : undefined
+    const ctx = this.chainContext(difficulty)
+    const stops = VERSION_ROUTES[version][role]
     const entries: ChainEntry[] = []
-    for (const name of chain) {
-      const llm = this.providers[name]
-      let model = def.physical[name]
-      let modelFallback: string | undefined
-      if (exclusive && name === 'explabs') {
-        const override = exclusive[def.role as 'master' | 'coding' | 'review']
-        if (override) {
-          model = override.model
-          modelFallback = override.fallback
-        }
-      }
-      if (!llm || !model) continue
-      entries.push(modelFallback ? { provider: name, llm, model, modelFallback } : { provider: name, llm, model })
+    for (const stop of stops) {
+      let provider: ProviderName = stop.provider
+      if (provider === 'bai' && !ctx.baiConfigured) provider = 'zai'
+      if (provider === 'nvidia' && !ctx.nvidiaConfigured) continue
+      const def = MODEL_REGISTRY.find((d) => d.id === LOGICAL_TO_REGISTRY[stop.model])
+      if (!def) continue
+      const physical = def.physical[provider]
+      if (!physical) continue
+      const llm = this.providers[provider]
+      if (!llm) continue
+      entries.push(
+        stop.onRateLimit
+          ? { provider, llm, model: physical, onRateLimit: stop.onRateLimit }
+          : { provider, llm, model: physical }
+      )
     }
-    return { entries, version, chain }
+    return { entries, version }
   }
 
-  /** Mapeia papel lógico → modelo configurado. */
-  modelForRole(role: ModelRole): string {
+  /** Mapeia papel do agente → papel da rota (testes usam review; github usa master). */
+  private routeRoleOf(role: ModelRole): RouteRole | null {
     switch (role) {
       case 'master':
-        return STUDIO_CONFIG.models.master
+      case 'github':
+        return 'master'
       case 'coding':
-        return STUDIO_CONFIG.models.coding
+        return 'coding'
       case 'review':
       case 'testing':
-        return STUDIO_CONFIG.models.review
-      case 'github':
-        return STUDIO_CONFIG.models.master
-      case 'deepseek':
-        return STUDIO_CONFIG.models.deepseek
+        return 'review'
+      default:
+        return null // deepseek e papéis especiais: caminho legado
     }
   }
 
-  /** Disponibilidade do modelo (providers do chain funcionais + regras). */
+  /** Modelo lógico PRINCIPAL do papel na versão ativa (auditoria/DB). */
+  modelForRole(role: ModelRole): string {
+    if (role === 'deepseek') return STUDIO_CONFIG.models.deepseek
+    const r3 = this.routeRoleOf(role)
+    if (r3) {
+      const version = this.activeVersion()
+      const stops = VERSION_ROUTES[version][r3]
+      const first = stops[0]
+      if (first) return LOGICAL_TO_REGISTRY[first.model]
+    }
+    return STUDIO_CONFIG.models.master
+  }
+
+  /** Disponibilidade do modelo (rota do papel funcional + regras). */
   async isModelAvailable(modelId: string): Promise<{ available: boolean; reason?: string }> {
     const def = MODEL_REGISTRY.find((m) => m.id === modelId)
     if (!def) return { available: false, reason: 'modelo não registrado' }
 
-    if (def.id === STUDIO_CONFIG.models.deepseek) {
+    if (def.id === STUDIO_CONFIG.models.deepseek && def.role === 'deepseek') {
       if (!STUDIO_CONFIG.models.enableDeepseek) {
         return { available: false, reason: 'ENABLE_DEEPSEEK=false (desativado por padrão)' }
       }
@@ -243,18 +261,31 @@ export class ModelRouter {
           reason: `limite diário do DeepSeek atingido (${used}/${STUDIO_CONFIG.models.deepseekMaxDailyRequests})`,
         }
       }
+      return { available: true }
     }
 
-    const { entries, version } = this.entriesFor(def)
+    const r3 = this.routeRoleOf(def.role)
+    if (!r3) return { available: false, reason: `papel ${def.role} sem rota (versão ${this.activeVersion()})` }
+    const { entries, version } = this.routeEntries(r3)
+    const logicalKey = (Object.keys(LOGICAL_TO_REGISTRY) as LogicalModelKey[]).find(
+      (k) => LOGICAL_TO_REGISTRY[k] === def.id
+    )
+    const inRoute = VERSION_ROUTES[version][r3].some((s) => s.model === logicalKey)
+    if (!inRoute) {
+      return {
+        available: false,
+        reason: `modelo fora da rota ${r3} da versão ${version} (master/coding/review são definidos por versão)`,
+      }
+    }
     if (entries.length === 0) {
-      return { available: false, reason: `nenhum provider do chain (versão ${version}) serve este modelo` }
+      return { available: false, reason: `nenhuma parada da rota ${r3} está configurada (versão ${version})` }
     }
     for (const e of entries) {
       try {
         if (await e.llm.isAvailable()) return { available: true }
-      } catch { /* provider indisponível — tenta o próximo do chain */ }
+      } catch { /* parada indisponível — tenta a próxima da rota */ }
     }
-    return { available: false, reason: 'providers do chain indisponíveis' }
+    return { available: false, reason: 'paradas da rota indisponíveis' }
   }
 
   private today(): string {
@@ -269,38 +300,27 @@ export class ModelRouter {
   }
 
   /**
-   * Chamada principal: percorre o chain da versão ativa com failover
-   * CONTROLADO (429 nunca; elegíveis avançam; 1 tentativa por provider).
-   * DeepSeek só passa se TODAS as condições forem satisfeitas.
+   * Chamada por PAPEL: percorre a rota da versão ativa com failover
+   * CONTROLADO + política anti-rate-limit (429 → backoff/smart-fallback;
+   * 3x 429 → QUOTA_EXHAUSTED que PARA o run — nunca corrige quota).
    */
-  async chat(
-    modelId: string,
+  async chatRole(
+    role: ModelRole,
     messages: ChatMessage[],
     opts?: { temperature?: number; maxTokens?: number; difficulty?: Difficulty }
   ): Promise<CompletionResult> {
-    const def = MODEL_REGISTRY.find((m) => m.id === modelId)
-    if (!def) throw Object.assign(new Error(`MODELO_DESCONHECIDO: ${modelId}`), { code: 'UNAVAILABLE' })
-
-    if (def.id === STUDIO_CONFIG.models.deepseek) {
-      const gate = await this.isModelAvailable(def.id)
-      if (!gate.available) {
-        throw Object.assign(
-          new Error(`DEEPSEEK_BLOQUEADO: ${gate.reason}`),
-          { code: 'DISABLED' }
-        )
-      }
+    const r3 = this.routeRoleOf(role)
+    if (!r3) {
+      // papéis sem rota (deepseek legado): caminho direto por modelo
+      return this.chat(this.modelForRole(role), messages, opts)
     }
-
-    const { entries, version } = this.entriesFor(def, opts?.difficulty)
+    const { entries, version } = this.routeEntries(r3, opts?.difficulty)
     if (entries.length === 0) {
       throw Object.assign(
-        new Error(
-          `PROVIDER_AUSENTE: nenhum provider do chain (versão ${version}) serve ${modelId}`
-        ),
+        new Error(`PROVIDER_AUSENTE: nenhuma parada da rota ${r3} configurada (versão ${version})`),
         { code: 'UNAVAILABLE' }
       )
     }
-
     let result: CompletionResult
     try {
       await this.throttle()
@@ -312,38 +332,74 @@ export class ModelRouter {
       result = executed.result
       if (executed.provider !== entries[0]?.provider) {
         console.warn(
-          `[ModelRouter] failover do chain: ${entries[0]?.provider} → ${executed.provider} (model lógico ${modelId}, versão ${version})`
+          `[ModelRouter] failover da rota ${r3}: ${entries[0]?.provider} → ${executed.provider} (versão ${version})`
         )
       }
-      await this.recordUsage(modelId, result)
+      await this.recordUsage(this.modelForRole(role), result)
       return result
     } catch (err) {
-      await this.recordUsage(modelId, null, true)
+      await this.recordUsage(this.modelForRole(role), null, true)
       throw err
     }
   }
 
-  /** Atalho: chat por papel (master/coding/review...). */
-  async chatRole(
-    role: ModelRole,
+  /**
+   * Chamada por MODELO LÓGICO (legado/compat): o modelo deve participar
+   * da rota do seu papel na versão ativa; a execução percorre a rota
+   * completa (failover + anti-rate-limit idênticos ao chatRole).
+   */
+  async chat(
+    modelId: string,
     messages: ChatMessage[],
     opts?: { temperature?: number; maxTokens?: number; difficulty?: Difficulty }
-  ) {
-    return this.chat(this.modelForRole(role), messages, opts)
+  ): Promise<CompletionResult> {
+    const def = MODEL_REGISTRY.find((m) => m.id === modelId)
+    if (!def) throw Object.assign(new Error(`MODELO_DESCONHECIDO: ${modelId}`), { code: 'UNAVAILABLE' })
+
+    // DeepSeek como PAPEL emergência (legado): gated por regras de negócio
+    if (def.id === STUDIO_CONFIG.models.deepseek && def.role === 'deepseek') {
+      const gate = await this.isModelAvailable(def.id)
+      if (!gate.available) {
+        throw Object.assign(new Error(`DEEPSEEK_BLOQUEADO: ${gate.reason}`), { code: 'DISABLED' })
+      }
+      const provider = baiKeysPresent() ? this.providers.bai : this.providers.zai
+      const physical = def.physical[baiKeysPresent() ? 'bai' : 'zai']
+      if (!physical) {
+        throw Object.assign(
+          new Error(`PROVIDER_AUSENTE: ${modelId} sem modelo físico no provider primário`),
+          { code: 'UNAVAILABLE' }
+        )
+      }
+      await this.throttle()
+      const result = await provider.complete({
+        messages,
+        temperature: opts?.temperature,
+        maxTokens: opts?.maxTokens,
+        model: physical,
+      })
+      await this.recordUsage(modelId, result)
+      return result
+    }
+
+    // Modelos de rota: delega para a rota do papel (comportamento unificado)
+    const r3 = this.routeRoleOf(def.role)
+    if (!r3) {
+      throw Object.assign(new Error(`MODELO_SEM_ROTA: ${modelId}`), { code: 'UNAVAILABLE' })
+    }
+    return this.chatRole(r3 === 'master' ? 'master' : r3 === 'coding' ? 'coding' : 'review', messages, opts)
   }
 
   /**
-   * Fallback CONTROLADO para DeepSeek — somente quando:
-   * habilitado + dificuldade difícil + falha dos modelos gratuitos.
+   * Fallback CONTROLADO para DeepSeek (legado) — somente quando:
+   * habilitado + dificuldade difícil + falha dos modelos da rota.
    */
   async chatWithDeepseekFallback(
     primaryRole: ModelRole,
     messages: ChatMessage[],
     opts?: { temperature?: number; maxTokens?: number; difficulty?: 'easy' | 'medium' | 'hard' }
   ): Promise<{ result: CompletionResult; usedFallback: boolean }> {
-    const primary = this.modelForRole(primaryRole)
     try {
-      const result = await this.chat(primary, messages, opts)
+      const result = await this.chatRole(primaryRole, messages, opts)
       return { result, usedFallback: false }
     } catch (primaryErr) {
       const difficulty = opts?.difficulty ?? 'medium'
@@ -417,6 +473,11 @@ export class ModelRouter {
       today: todayUsage,
       enableDeepseek: STUDIO_CONFIG.models.enableDeepseek,
       chain: { version, providers: chain },
+      routes: {
+        master: VERSION_ROUTES[version].master.map((s) => `${s.provider}:${s.model}`),
+        coding: VERSION_ROUTES[version].coding.map((s) => `${s.provider}:${s.model}`),
+        review: VERSION_ROUTES[version].review.map((s) => `${s.provider}:${s.model}`),
+      },
       totalsToday: todayUsage.reduce(
         (acc, u) => ({
           requests: acc.requests + u.requests,
