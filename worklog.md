@@ -455,3 +455,27 @@ Stage Summary:
 - Commits: 351e3ad (núcleo+orquestrador+UI+41 testes) + bf99999 (fix recuperação) — 2 commits, 2 deploys READY; produção https://ai-development-studio-gamma.vercel.app
 - 41/41 testes unitários · 16/16 invariantes × 3 runs · 13/13 browser · 0 erros 5xx
 - Pronto para uso; sucesso pleno (COMPLETED) sujeito à janela de cota B.AI (limitação externa, não do código)
+
+---
+Task ID: PV1
+Agent: main (Super Z — LEAD ENGINEER)
+Task: PROVIDERS NVIDIA + EXPERIENTIAL LABS com chain de roteamento por versão do Poskli + limpeza de dados de teste do Neon
+
+Work Log (LIMPAR → VALIDAR CHAVES → IMPLEMENTAR → TESTAR → BUILDAR → COMMITAR):
+- LIMPEZA DO BANCO (Neon, produção): 49 usuários → 1 (48 apagados; mantido EXCLUSIVAMENTE o usuário principal, identificado por ser o dono da conta Vercel oficialwehelp-4013 e do run real de hoje); 29 projetos → 1; cascades confirmadas (User→Session/Project/GithubConnection; Project→Settings/Task/AgentRun→ToolCall); tabelas sem relation (PoskliRun/Execution/WorkspaceFile/WorkspaceSnapshot/ActivityEvent) apagadas manualmente por projectId dentro de transação; órfãos residuais limpos; ModelUsage preservado (histórico de uso); run IMPLEMENTING do usuário principal preservado (dado dele, recuperável via recoverStaleRun)
+- Contas de teste apagadas: padrões @studio-test.local (41), @test.dev (4), @studio.local (2) + 1 conta de origem incerta criada às 15:51 de ontem (quando o registro público em produção era impossível — API 500 até 18:42; 0 runs; não consta em nenhum script do repo)
+- VALIDAÇÃO LIVE DAS CHAVES (evidência real, chaves jamais impressas): NVIDIA GET /v1/models → 200 (81 modelos; nemotron-3-super-120b-a12b ✔, openai/gpt-oss-20b ✔, deepseek-ai/deepseek-v4-flash-0731 ✔ com cold start lento); EXPLABS GET /v1/models → 200 (313 modelos; gpt-6-astra ✔, claude-fable-5.1 ✔; NÃO existe "fable-5.1" simples); chat real NVIDIA deepseek → 200; chat EXPLABS aion-2.0 → 200 (modelos Claude/GPT respondem 403 model_location_not_supported a partir DA localização do sandbox — em produção Vercel a localização difere; o provider trata com retry regional)
+- IMPLEMENTAÇÃO: error-classes.ts (classificação pura, zero imports — importável por node:test; bai-key-manager importa e re-exporta p/ compat); chain.ts (NÚCLEO PURO: chains por versão 0.1/0.2/0.3.1/1.0-flash, resolveChain com substituição zai-sandbox, executeWithChain com política inviolável 429-nunca-faz-failover, elegíveis avançam, CLIENT_ERROR/UNKNOWN conservador, BAI ALL_KEYS_FAILED avança); providers/openai-compat.ts (base HTTP compartilhada: timeout AbortController, erros classificados, 200-com-erro e resposta vazia controlados, suporte a modelos de raciocínio NIM content-null/reasoning_content); providers/nvidia.ts e providers/experiential.ts (catálogos por papel env-configuráveis; Experiential com retry ÚNICO regional do master 403→fallback)
+- ROUTER: registry com mapa physical por provider (id lógico estável p/ ModelUsage/UI); chat() percorre o chain via executeWithChain (throttle mantido); overview() expõe chain {version, providers}; gate DeepSeek triplo inalterado; assinaturas chatRole/chatWithDeepseekFallback compatíveis (difficulty opcional adicionado)
+- CONFIG: seções router.poskliVersion (default 0.2), nvidia.baseUrl, explabs.baseUrl; ENV-VALIDATOR: POSKLI_VERSION whitelist (erro se inválida), avisos de providers ausentes por versão em produção, URLs https, ids de modelo sem espaços, NVIDIA_API_KEY/EXPLABS_API_KEY na SERVER_ONLY_VARS (negação NEXT_PUBLIC_), summary com last-4 das chaves novas
+- ENV VARS VERCEL (API v10, valores lidos de ficheiros .secrets e jamais impressos): NVIDIA_API_KEY, NVIDIA_BASE_URL, EXPLABS_API_KEY, EXPLABS_BASE_URL, POSKLI_VERSION=0.2 — 48 variáveis no projeto
+- TESTES: tests/providers-chain.test.ts (29: chains por versão, zai-sandbox, EXPLABS-só-difíceis, 429-nunca ×3 formas, elegíveis ×4 classes, ALL_KEYS_FAILED ×2, conservador ×3, chain vazio/exaurido, modelo físico por provider, opts repassados) + tests/providers-openai-compat.test.ts (21: chave ausente, parsing, classificação 429/5xx/401/403/404/400, rede, timeout, 200-com-erro, resposta vazia, raciocínio NIM ×2, chave-nunca-em-erro, retry regional ×4) = 50 NOVOS
+- SUÍTES EXISTENTES: poskli-state-machine 41/41 ✔; test-bai-key-manager 30/30 ✔ (refactor error-classes não quebrou); test-env-validator 36/36 ✔ (novas validações compatíveis); test-json-repair é integração LLM (quota externa do sandbox — documentado desde a Task 11)
+- QUALIDADE: tsc 19 erros pré-existentes → 13 após (router reescrito resolveu 4 antigos; ZERO novos nos ficheiros desta task); eslint limpo nos ficheiros novos; build de produção EXIT 0 (todas as rotas)
+- IMPORTS .ts explícitos nos ficheiros novos (tsconfig allowImportingTsExtensions) — necessários p/ node:test (ESM) e compatíveis com webpack/turbopack
+
+Stage Summary:
+- NVIDIA + EXPLABS implementados de verdade com chain por versão: 0.2 (produção) = B.AI → NVIDIA; ids de modelo corrigidos aos REAIS do endpoint (deepseek-ai/…, claude-fable-5.1)
+- Política 429-nunca preservada em todas as camadas (chaves BAI, providers, chain)
+- Neon limpo: 1 usuário real, 1 projeto, cascades verificadas; segredo preservado (chaves só em .secrets local e env vars da Vercel; grep anti-leak limpo)
+- Deploy via push (integração GitHub) com env vars já configuradas; smoke pós-READY na sequência

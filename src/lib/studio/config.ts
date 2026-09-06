@@ -55,6 +55,27 @@ export const STUDIO_CONFIG = {
     cooldownMs: num(process.env.BAI_KEY_COOLDOWN_MS, 60_000),
   },
 
+  // ---------- ROUTER — chain de providers por versão do Poskli ----------
+  router: {
+    // 0.1 | 0.2 | 0.3.1 | 1.0-flash (default: 0.2 — versão em produção)
+    //   0.1       : B.AI
+    //   0.2       : B.AI → NVIDIA
+    //   0.3.1     : B.AI → NVIDIA → EXPLABS (somente tarefas difíceis)
+    //   1.0-flash : NVIDIA → EXPLABS → B.AI (reserva)
+    // 429/rate limit NUNCA faz failover (política inviolável).
+    poskliVersion: envStr(process.env.POSKLI_VERSION) ?? '0.2',
+  },
+
+  // ---------- NVIDIA (provider adicional — NIM, OpenAI-compatible) ----------
+  nvidia: {
+    baseUrl: envStr(process.env.NVIDIA_BASE_URL) ?? 'https://integrate.api.nvidia.com/v1',
+  },
+
+  // ---------- EXPERIENTIAL LABS (EXPLABS — provider adicional) ----------
+  explabs: {
+    baseUrl: envStr(process.env.EXPLABS_BASE_URL) ?? 'https://api.experientiallabs.ai/v1',
+  },
+
   // ---------- LIMITES DO LOOP (nunca loop infinito) ----------
   limits: {
     maxAgentSteps: num(process.env.AGENT_MAX_STEPS, 30),

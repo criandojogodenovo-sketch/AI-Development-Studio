@@ -69,13 +69,27 @@ workspaces/<projectId>/       # 1 workspace isolado por projeto
 | Review/QA | Hy3 (`HY3_MODEL`) | ativo |
 | Fallback difícil | DeepSeek-V4-Flash (`DEEPSEEK_MODEL`) | **DESATIVADO** (`ENABLE_DEEPSEEK=false`) |
 
-Todos os modelos são acessados via **B.AI** (`BAI_API_KEY_1`/`BAI_API_KEY_2`) com **BAIKeyManager** — failover controlado:
+Todos os modelos são acessados por um **chain de providers** definido pela versão do Poskli (`POSKLI_VERSION`):
+
+| Versão | Chain |
+|---|---|
+| 0.1 | B.AI |
+| 0.2 (default) | B.AI → NVIDIA |
+| 0.3.1 | B.AI → NVIDIA → Experiential (tarefas difíceis) |
+| 1.0-flash | NVIDIA → Experiential → B.AI (reserva) |
+
+- **B.AI** (`BAI_API_KEY_1`/`BAI_API_KEY_2`) com **BAIKeyManager** — failover controlado:
 
 - `KEY 1` → falha **elegível** (rede, 5xx, timeout, 401) → `KEY 2` → ambas falham → **erro controlado**;
 - **rate limit (429) NUNCA dispara failover** (regra de uso do serviço);
 - máximo de 2 tentativas HTTP por chamada (1 por chave) — **sem rotação infinita**;
 - cooldown por chave após falhas elegíveis consecutivas;
 - logs apenas com índice da chave e classe do erro — **a chave nunca aparece em logs, UI, código ou mensagens a modelos**.
+
+- **NVIDIA** (`NVIDIA_API_KEY`, NIM OpenAI-compatible): master `nvidia/nemotron-3-super-120b-a12b`, coding `deepseek-ai/deepseek-v4-flash-0731`, review `openai/gpt-oss-20b` (ids validados ao vivo contra `/v1/models`).
+- **Experiential Labs** (`EXPLABS_API_KEY`): master `gpt-6-astra` (com retry regional para `claude-fable-5.1`), coding/review `claude-fable-5.1`.
+
+Failover entre providers (ProviderChain — `src/lib/studio/models/chain.ts`): falhas **elegíveis** (rede/5xx/timeout/401-403) avançam no chain; **429 nunca**; `CLIENT_ERROR`/`UNKNOWN` não avançam (conservador). Sem chaves B.AI no sandbox, o SDK local (`z-ai`) substitui o B.AI — a arquitetura de agentes não muda.
 
 DeepSeek só é usado se: explicitamente habilitado + problema difícil + modelos gratuitos falharam + limite diário não atingido. O `ModelRouter` bloqueia qualquer uso acidental. O sistema funciona **completamente sem DeepSeek**.
 

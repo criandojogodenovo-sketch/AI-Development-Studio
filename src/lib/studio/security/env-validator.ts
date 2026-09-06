@@ -34,6 +34,8 @@ export const SERVER_ONLY_VARS = [
   'DATABASE_URL',
   'BAI_API_KEY_1',
   'BAI_API_KEY_2',
+  'NVIDIA_API_KEY',
+  'EXPLABS_API_KEY',
   'GITHUB_TOKEN',
   'GITHUB_CLIENT_ID',
   'GITHUB_CLIENT_SECRET',
@@ -227,6 +229,48 @@ export function validateEnvironment(nodeEnv?: string): EnvValidationResult {
     }
   }
 
+  // ---------- 10b. CHAIN DE PROVIDERS (POSKLI_VERSION + NVIDIA + EXPLABS) ----------
+  // Consumidor: chain.ts / ModelRouter (roteamento por versão do Poskli)
+  const chainVersion = (process.env.POSKLI_VERSION ?? '').trim()
+  if (chainVersion && !['0.1', '0.2', '0.3.1', '1.0-flash'].includes(chainVersion)) {
+    errors.push(issue('error', 'POSKLI_VERSION', 'chain.ts / ModelRouter (roteamento de providers)',
+      `valor "${chainVersion.slice(0, 12)}" inválido — esperado 0.1 | 0.2 | 0.3.1 | 1.0-flash (default 0.2).`))
+  }
+  const nvKey = (process.env.NVIDIA_API_KEY ?? '').trim()
+  const xlKey = (process.env.EXPLABS_API_KEY ?? '').trim()
+  const activeVer = chainVersion || '0.2'
+  if (!nvKey && ['0.2', '0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
+    warnings.push(issue('warn', 'NVIDIA_API_KEY', 'NVIDIAProvider (chain do ModelRouter)',
+      `ausente em produção com POSKLI_VERSION=${activeVer} — o chain seguirá sem o provider NVIDIA (failover adicional indisponível).`))
+  }
+  if (!xlKey && ['0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
+    warnings.push(issue('warn', 'EXPLABS_API_KEY', 'ExperientialProvider (chain do ModelRouter)',
+      `ausente em produção com POSKLI_VERSION=${activeVer} — o chain seguirá sem o provider Experiential.`))
+  }
+  for (const [name, consumer] of [
+    ['NVIDIA_BASE_URL', 'NVIDIAProvider (endpoint)'],
+    ['EXPLABS_BASE_URL', 'ExperientialProvider (endpoint)'],
+  ] as const) {
+    const raw = (process.env[name] ?? '').trim()
+    if (raw && !/^https:\/\//.test(raw)) {
+      warnings.push(issue('warn', name, consumer, 'valor não é https:// — endpoints de LLM devem usar TLS.'))
+    }
+  }
+  for (const [name, consumer] of [
+    ['NVIDIA_MODEL_MASTER', 'ModelRouter (master/nvidia)'],
+    ['NVIDIA_MODEL_CODING', 'ModelRouter (coding/nvidia)'],
+    ['NVIDIA_MODEL_REVIEW', 'ModelRouter (review/nvidia)'],
+    ['EXPLABS_MODEL_MASTER', 'ModelRouter (master/explabs)'],
+    ['EXPLABS_MODEL_MASTER_FALLBACK', 'ExperientialProvider (fallback regional)'],
+    ['EXPLABS_MODEL_CODING', 'ModelRouter (coding/explabs)'],
+    ['EXPLABS_MODEL_REVIEW', 'ModelRouter (review/explabs)'],
+  ] as const) {
+    const raw = (process.env[name] ?? '').trim()
+    if (raw && /\s/.test(raw)) {
+      warnings.push(issue('warn', name, consumer, 'contém espaços — provavelmente inválido como id de modelo.'))
+    }
+  }
+
   // ---------- 11. Negação NEXT_PUBLIC_* de secrets ----------
   // Auditoria: NENHUM uso de NEXT_PUBLIC_ existe no código; se alguém
   // definir estas variantes, o bundler as exporia ao frontend.
@@ -258,10 +302,15 @@ export function environmentSummary(): Record<string, unknown> {
   const k1 = (process.env.BAI_API_KEY_1 ?? '').trim()
   const k2 = (process.env.BAI_API_KEY_2 ?? '').trim()
   const gh = (process.env.GITHUB_TOKEN ?? '').trim()
+  const nv = (process.env.NVIDIA_API_KEY ?? '').trim()
+  const xl = (process.env.EXPLABS_API_KEY ?? '').trim()
   return {
     nodeEnv: process.env.NODE_ENV ?? '(unset)',
     database: POSTGRES_URL_RE.test((process.env.DATABASE_URL ?? '').trim()) ? 'postgresql ok' : 'INVÁLIDA/AUSENTE',
     baiKeys: { key1: Boolean(k1), key2: Boolean(k2), provider: k1 || k2 ? 'bai' : 'zai-sandbox' },
+    nvidiaKey: nv ? `configurada (…${nv.slice(-4)})` : 'não configurada',
+    explabsKey: xl ? `configurada (…${xl.slice(-4)})` : 'não configurada',
+    poskliVersion: (process.env.POSKLI_VERSION ?? '0.2').trim() || '0.2',
     githubToken: gh ? `configurado (…${gh.slice(-4)})` : 'não configurado',
     deepseekEnabled: (process.env.ENABLE_DEEPSEEK ?? 'false') === 'true',
     executionProvider: (process.env.EXECUTION_PROVIDER ?? 'local').trim(),

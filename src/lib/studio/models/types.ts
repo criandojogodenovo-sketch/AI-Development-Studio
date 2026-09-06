@@ -4,11 +4,15 @@
 
 export type ModelRole = 'master' | 'coding' | 'review' | 'testing' | 'github' | 'deepseek'
 
+/** Providers físicos do sistema (o chain decide a ordem por versão do Poskli). */
+export type ProviderName = 'bai' | 'zai' | 'nvidia' | 'explabs'
+
 export interface ModelDefinition {
-  id: string            // ex: glm-5.3-flash
+  id: string            // id lógico — nome no provider primário (B.AI); estável p/ uso/auditoria
   label: string         // ex: GLM-5.3-Flash
   role: ModelRole
-  provider: 'bai' | 'zai' | 'openai-compatible'
+  /** modelo FÍSICO por provider — o ProviderChain resolve qual usar */
+  physical: Partial<Record<ProviderName, string>>
   enabledByDefault: boolean
   description: string
 }

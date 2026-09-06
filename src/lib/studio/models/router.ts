@@ -7,65 +7,101 @@
 //   4. DeepSeek-V4-Flash → DESATIVADO POR PADRÃO (ENABLE_DEEPSEEK=false)
 //      Somente se: explicitamente habilitado + problema difícil +
 //      modelos gratuitos falharam + limites diários permitirem.
-// Provedor físico: B.AI (BAI_API_KEY_1/2 com failover controlado)
-// quando configurado; neste sandbox, fallback para o SDK local.
-// Também: verificação de disponibilidade, controles de limite,
-// registro de uso (ModelUsage) — nunca uso acidental do DeepSeek.
+//
+// PROVIDERS FÍSICOS — chain por versão do Poskli (POSKLI_VERSION):
+//   0.1       : B.AI
+//   0.2       : B.AI → NVIDIA
+//   0.3.1     : B.AI → NVIDIA → EXPLABS (somente tarefas difíceis)
+//   1.0-flash : NVIDIA → EXPLABS → B.AI (reserva)
+// Sem chaves B.AI (sandbox): SDK local (zai) substitui o B.AI.
+//
+// POLÍTICA INVARIÁVEL: 429/rate limit NUNCA faz failover (nem entre
+// chaves B.AI, nem entre providers). Falhas elegíveis (rede/5xx/
+// timeout/401-403) avançam no chain — 1 tentativa por provider.
+// Uso registrado por modelo LÓGICO (ModelUsage) — rastreabilidade.
 // ============================================================
 
 import { db } from '@/lib/db'
 import { STUDIO_CONFIG } from '../config'
 import { BAIProvider } from './providers/bai-provider'
 import { ZAIProvider } from './providers/zai-provider'
+import { NVIDIAProvider, NVIDIA_MODEL_CATALOG } from './providers/nvidia.ts'
+import { ExperientialProvider, EXPLABS_MODEL_CATALOG } from './providers/experiential.ts'
+import {
+  executeWithChain,
+  normalizeVersion,
+  resolveChain,
+  type ChainContext,
+  type ChainEntry,
+  type Difficulty,
+  type PoskliVersion,
+  type ProviderName,
+} from './chain'
 import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, ModelRole } from './types'
 
 // ---------- REGISTRO DE MODELOS LÓGICOS ----------
-// O provider físico real (B.AI ou SDK sandbox) é decidido em tempo de
-// execução: chaves B.AI configuradas → 'bai'; caso contrário → 'zai'.
-// Modelos lógicos diferenciam-se por papel, prompt e parâmetros,
-// e o uso é registrado por modelo lógico (rastreabilidade real).
+// O id lógico é o nome no provider PRIMÁRIO (B.AI) e permanece
+// estável para uso/auditoria (ModelUsage, UI). Cada entrada mapeia
+// o modelo FÍSICO de cada provider — o chain decide qual usar em
+// tempo de execução.
 
-// Nome de provider físico ativo (server-side only, sem secrets)
-function activeProviderName(): 'bai' | 'zai' {
+function baiKeysPresent(): boolean {
   const k1 = (process.env.BAI_API_KEY_1 ?? '').trim()
   const k2 = (process.env.BAI_API_KEY_2 ?? '').trim()
-  return k1 || k2 ? 'bai' : 'zai'
+  return Boolean(k1 || k2)
 }
 
 function buildRegistry(): ModelDefinition[] {
-  const provider = activeProviderName()
   return [
     {
       id: STUDIO_CONFIG.models.master,
       label: 'GLM-5.3-Flash',
       role: 'master',
-      provider,
       enabledByDefault: true,
       description: 'Master Agent / Orquestrador — análise, planejamento, decisões',
+      physical: {
+        bai: STUDIO_CONFIG.models.master,
+        zai: STUDIO_CONFIG.models.master,
+        nvidia: NVIDIA_MODEL_CATALOG.master,
+        explabs: EXPLABS_MODEL_CATALOG.master,
+      },
     },
     {
       id: STUDIO_CONFIG.models.coding,
       label: 'Qwen3.8-Flash',
       role: 'coding',
-      provider,
       enabledByDefault: true,
       description: 'Coding Agent — implementação de código e correções',
+      physical: {
+        bai: STUDIO_CONFIG.models.coding,
+        zai: STUDIO_CONFIG.models.coding,
+        nvidia: NVIDIA_MODEL_CATALOG.coding,
+        explabs: EXPLABS_MODEL_CATALOG.coding,
+      },
     },
     {
       id: STUDIO_CONFIG.models.review,
       label: 'Hy3',
       role: 'review',
-      provider,
       enabledByDefault: true,
       description: 'Review/QA — revisão de código, qualidade, segurança',
+      physical: {
+        bai: STUDIO_CONFIG.models.review,
+        zai: STUDIO_CONFIG.models.review,
+        nvidia: NVIDIA_MODEL_CATALOG.review,
+        explabs: EXPLABS_MODEL_CATALOG.review,
+      },
     },
     {
       id: STUDIO_CONFIG.models.deepseek,
       label: 'DeepSeek-V4-Flash',
       role: 'deepseek',
-      provider,
       enabledByDefault: false, // DESATIVADO POR PADRÃO — regra de negócio
       description: 'Fallback para problemas difíceis. Requer ENABLE_DEEPSEEK=true.',
+      physical: {
+        bai: STUDIO_CONFIG.models.deepseek,
+        zai: STUDIO_CONFIG.models.deepseek,
+      },
     },
   ]
 }
@@ -76,13 +112,14 @@ export class ModelRouter {
   private providers: Record<string, LLMProvider>
 
   constructor() {
-    // Provider físico: B.AI (com failover de chaves) quando configurado;
-    // caso contrário, SDK do sandbox — a arquitetura de agentes não muda.
-    this.providers =
-      activeProviderName() === 'bai'
-        ? { bai: new BAIProvider() }
-        : { zai: new ZAIProvider() }
+    this.providers = {
+      bai: new BAIProvider(),
+      zai: new ZAIProvider(),
+      nvidia: new NVIDIAProvider(),
+      explabs: new ExperientialProvider(),
+    }
   }
+
   // Throttle global: intervalo mínimo entre chamadas LLM (evita 429)
   private lastCallAt = 0
   private readonly minIntervalMs = 1500
@@ -92,6 +129,38 @@ export class ModelRouter {
     const wait = this.lastCallAt + this.minIntervalMs - now
     if (wait > 0) await new Promise((r) => setTimeout(r, wait))
     this.lastCallAt = Date.now()
+  }
+
+  // ---------- CHAIN (providers físicos por versão do Poskli) ----------
+
+  private activeVersion(): PoskliVersion {
+    return normalizeVersion(STUDIO_CONFIG.router.poskliVersion)
+  }
+
+  private chainContext(difficulty?: Difficulty): ChainContext {
+    return {
+      baiConfigured: baiKeysPresent(),
+      nvidiaConfigured: (this.providers.nvidia as NVIDIAProvider).isConfigured(),
+      explabsConfigured: (this.providers.explabs as ExperientialProvider).isConfigured(),
+      difficulty,
+    }
+  }
+
+  /** Entradas do chain (provider + modelo físico) para um modelo lógico. */
+  private entriesFor(
+    def: ModelDefinition,
+    difficulty?: Difficulty
+  ): { entries: ChainEntry[]; version: PoskliVersion; chain: ProviderName[] } {
+    const version = this.activeVersion()
+    const chain = resolveChain(version, this.chainContext(difficulty))
+    const entries: ChainEntry[] = []
+    for (const name of chain) {
+      const llm = this.providers[name]
+      const model = def.physical[name]
+      if (!llm || !model) continue
+      entries.push({ provider: name, llm, model })
+    }
+    return { entries, version, chain }
   }
 
   /** Mapeia papel lógico → modelo configurado. */
@@ -111,7 +180,7 @@ export class ModelRouter {
     }
   }
 
-  /** Disponibilidade do modelo (provider funcional + regras). */
+  /** Disponibilidade do modelo (providers do chain funcionais + regras). */
   async isModelAvailable(modelId: string): Promise<{ available: boolean; reason?: string }> {
     const def = MODEL_REGISTRY.find((m) => m.id === modelId)
     if (!def) return { available: false, reason: 'modelo não registrado' }
@@ -128,10 +197,17 @@ export class ModelRouter {
         }
       }
     }
-    const provider = this.providers[def.provider]
-    if (!provider) return { available: false, reason: `provider ${def.provider} não implementado` }
-    const ok = await provider.isAvailable()
-    return ok ? { available: true } : { available: false, reason: 'provider indisponível' }
+
+    const { entries, version } = this.entriesFor(def)
+    if (entries.length === 0) {
+      return { available: false, reason: `nenhum provider do chain (versão ${version}) serve este modelo` }
+    }
+    for (const e of entries) {
+      try {
+        if (await e.llm.isAvailable()) return { available: true }
+      } catch { /* provider indisponível — tenta o próximo do chain */ }
+    }
+    return { available: false, reason: 'providers do chain indisponíveis' }
   }
 
   private today(): string {
@@ -146,10 +222,15 @@ export class ModelRouter {
   }
 
   /**
-   * Chamada principal com registro de uso.
+   * Chamada principal: percorre o chain da versão ativa com failover
+   * CONTROLADO (429 nunca; elegíveis avançam; 1 tentativa por provider).
    * DeepSeek só passa se TODAS as condições forem satisfeitas.
    */
-  async chat(modelId: string, messages: ChatMessage[], opts?: { temperature?: number; maxTokens?: number }): Promise<CompletionResult> {
+  async chat(
+    modelId: string,
+    messages: ChatMessage[],
+    opts?: { temperature?: number; maxTokens?: number; difficulty?: Difficulty }
+  ): Promise<CompletionResult> {
     const def = MODEL_REGISTRY.find((m) => m.id === modelId)
     if (!def) throw Object.assign(new Error(`MODELO_DESCONHECIDO: ${modelId}`), { code: 'UNAVAILABLE' })
 
@@ -163,10 +244,12 @@ export class ModelRouter {
       }
     }
 
-    const provider = this.providers[def.provider]
-    if (!provider) {
+    const { entries, version } = this.entriesFor(def, opts?.difficulty)
+    if (entries.length === 0) {
       throw Object.assign(
-        new Error(`PROVIDER_AUSENTE: ${def.provider}`),
+        new Error(
+          `PROVIDER_AUSENTE: nenhum provider do chain (versão ${version}) serve ${modelId}`
+        ),
         { code: 'UNAVAILABLE' }
       )
     }
@@ -174,7 +257,17 @@ export class ModelRouter {
     let result: CompletionResult
     try {
       await this.throttle()
-      result = await provider.complete({ model: modelId, messages, ...opts })
+      const executed = await executeWithChain(entries, {
+        messages,
+        temperature: opts?.temperature,
+        maxTokens: opts?.maxTokens,
+      })
+      result = executed.result
+      if (executed.provider !== entries[0]?.provider) {
+        console.warn(
+          `[ModelRouter] failover do chain: ${entries[0]?.provider} → ${executed.provider} (model lógico ${modelId}, versão ${version})`
+        )
+      }
       await this.recordUsage(modelId, result)
       return result
     } catch (err) {
@@ -184,7 +277,11 @@ export class ModelRouter {
   }
 
   /** Atalho: chat por papel (master/coding/review...). */
-  async chatRole(role: ModelRole, messages: ChatMessage[], opts?: { temperature?: number; maxTokens?: number }) {
+  async chatRole(
+    role: ModelRole,
+    messages: ChatMessage[],
+    opts?: { temperature?: number; maxTokens?: number; difficulty?: Difficulty }
+  ) {
     return this.chat(this.modelForRole(role), messages, opts)
   }
 
@@ -219,7 +316,7 @@ export class ModelRouter {
     }
   }
 
-  /** Registra uso no agregado diário por modelo. */
+  /** Registra uso no agregado diário por modelo lógico. */
   private async recordUsage(model: string, result: CompletionResult | null, isError = false): Promise<void> {
     try {
       await db.modelUsage.upsert({
@@ -250,6 +347,8 @@ export class ModelRouter {
   /** Snapshot para a UI (Models/Usage) — sem secrets. */
   async overview() {
     const usage = await db.modelUsage.findMany({ orderBy: { day: 'desc' }, take: 60 })
+    const version = this.activeVersion()
+    const chain = resolveChain(version, this.chainContext())
     const models = await Promise.all(
       MODEL_REGISTRY.map(async (m) => {
         const gate = await this.isModelAvailable(m.id)
@@ -269,6 +368,7 @@ export class ModelRouter {
       models,
       today: todayUsage,
       enableDeepseek: STUDIO_CONFIG.models.enableDeepseek,
+      chain: { version, providers: chain },
       totalsToday: todayUsage.reduce(
         (acc, u) => ({
           requests: acc.requests + u.requests,

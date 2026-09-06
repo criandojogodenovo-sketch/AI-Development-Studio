@@ -10,11 +10,14 @@ cd "$(dirname "$0")/.."
 FAIL=0
 scan() {
   # $1 = padrão (ERE), $2 = descrição
-  # Exclui: .env.example (só placeholders) e o próprio scanner (suas regexes
-  # de detecção casariam consigo mesmas — falso positivo de auto-referência).
+  # Exclui: .env.example (só placeholders), o próprio scanner (suas regexes
+  # de detecção casariam consigo mesmas — falso positivo de auto-referência)
+  # e scripts/test-env-validator.ts (usa APENAS valores FAKE de teste —
+  # url user:pass@ep-host e chaves FAKE-*; mesmo tipo de falso positivo
+  # documentado na Task 10 e agora na PV1).
   local pattern="$1" desc="$2"
   local hits
-  hits=$(git ls-files -z | xargs -0 grep -lE "$pattern" 2>/dev/null | grep -vE '^(\.env\.example|scripts/secret-scan\.sh)$' || true)
+  hits=$(git ls-files -z | xargs -0 grep -lE "$pattern" 2>/dev/null | grep -vE '^(\.env\.example|scripts/secret-scan\.sh|scripts/test-env-validator\.ts)$' || true)
   if [ -n "$hits" ]; then
     echo "❌ $desc:"
     echo "$hits" | sed 's/^/   /'
