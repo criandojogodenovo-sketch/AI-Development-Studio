@@ -408,3 +408,50 @@ Stage Summary:
 - IDE FUNCIONAL EM PRODUÇÃO: workspace persistente (Neon), terminal real com streaming, Monaco completo, preview com console, Git/GitHub real (push verificado), Poskli 0.1 real (testes verdes via engine), command center desktop+mobile
 - LIMITAÇÕES HONESTAS DOCUMENTADAS: comandos vivem dentro de 1 invocação (máx 240s; builds longos exigiriam executor dedicado — interface DockerExecutionProvider/RemoteSandboxProvider pronta); rate limit in-memory é por instância lambda; preview roda código do próprio usuário com mesma origem (cookie HttpOnly protege o token); isolamento de execução é por processo (não contêiner — sem Docker na Vercel Hobby); sandbox LLM 429 afetou apenas testes locais (produção usa B.AI)
 - Repos de teste remanescentes (token sem scope delete_repo): studio-push-test-1788648016033 e studio-prod-push-1788648930674 (privados, deletáveis manualmente)
+
+---
+Task ID: P02
+Agent: main (Super Z — LEAD ENGINEER)
+Task: POSKLI 0.2 — máquina de estados determinística, observável e conservadora (sem falso positivo de conclusão)
+
+Work Log:
+- AUDITORIA 0.1→0.2: falha crítica em orchestrator.ts:519 — finalState = testPassed ? 'COMPLETED' : 'FAILED' (decisão por UM boolean; ignorava tarefas/revisão/correções → caso inválido §10 POSSÍVEL); sem PARTIAL/BLOCKED; rate limit não classificado; correções sem registros individuais; recuperação de run travado com bug startedAt duplicado
+- NÚCLEO PURO (zero imports → testável isoladamente): state-machine.ts (deriveFinalStatus com 6 critérios — tarefas/testes/revisão/correções/verificação/ciclo-de-vida; agregação conservadora: FAIL→FAILED, bloqueio+progresso→PARTIAL, bloqueio total→BLOCKED; buildVerificationChecks preview/build/artefatos; deriveResultMarkdown da mesma fonte) + errors.ts (taxonomia §31 com masking de segredos; BAI_RATE_LIMIT→BLOCKED sem failover por política — respeita bai-key-manager.ts:262)
+- PRISMA: PoskliRun + derived/testRecords/corrections/reviewResult/errorCode/outcomeReason/updatedAt (@default(now()) p/ rows existentes — sem isso o db push falhava em tabela não-vazia) + índice [projectId, state]; db push Neon OK (26 colunas — verificado por query information_schema)
+- ORQUESTRADOR 0.2 reescrito: CONCLUÍDO somente via deriveFinalStatus(); testRecords com identidade (id/executionId/trigger/exitCode); corrections com estado individual (PLANNED/STARTED/COMPLETED/FAILED/BLOCKED) + contadores aplicadas/planejadas; reviewStage com classificação (rate limit→BLOCKED + evento review.blocked; timeout/provider→1 retry limitado); VERIFYING com checklist determinístico (preview+build quando aplicável+artefatos auditados via ToolCall OK de create_file/modify_file); catch classifica erro e deriva interrompido≠concluído; recoverStaleRun honesto (BLOCKED/PARTIAL em vez de FAILED cego)
+- Rotas: run/fix usam recoverStaleRun + detecção stale por updatedAt (bug fixado); detail retorna estados terminais novos + attempts/maxAttempts nas tarefas; DELETE aceita BLOCKED/PARTIAL como finalizados
+- UI poskli-panel 0.2: hierarquia STATUS GLOBAL→PROGRESSO→ETAPAS→TAREFAS→EXECUÇÕES→EVIDÊNCIAS; estado SEMPRE do backend (run.state + run.derived — UI nunca deriva); critérios com evidências; correções 0/N honestas; testes com identidade estável (sem duplicação em polling de 4s); Parcial/Bloqueado visíveis; ícones Lucide para task.blocked/review.blocked/correction.*
+- TESTES: tests/poskli-state-machine.test.ts — 41/41 PASS (node --test, type stripping): 24 obrigatórios §33 + caso inválido §10 reproduzido EXATAMENTE (0/2+impl FAILED+npm test SUCCESS+correção 0/3 → FAILED, jamais CONCLUÍDO) + 8 de classificação de erros + 8 extras (contadores reais, cancelamento, markdown=derivação, determinismo, serialização estável)
+- QUALIDADE: tsc 14 erros pré-existentes, ZERO novos nos arquivos 0.2; npm run build EXIT 0; secret-scan nos arquivos novos LIMPO (matches eram o próprio regex de masking, 'task-graph' e fakes de teste)
+- COMMIT 351e3ad (1 commit, 16 arquivos) → PUSH origin main OK (b4f28a9..351e3ad via one-time token URL) → DEPLOY ai-development-studio-a3y35tmew-mad-ae04 READY → alias gamma
+- SMOKE PRODUÇÃO (scripts/smoke-poskli02.mjs): 3 cenários — A sucesso real (contarVidas verificável), B falha controlada (teste impossível pré-criado: validação que testes vermelhos JAMAIS geram CONCLUÍDO), C cancelamento mid-run (interrompido ≠ concluído); invariantes da máquina validados independentemente do comportamento do agente
+
+Stage Summary:
+- POSKLI 0.2 EM PRODUÇÃO: deriveFinalStatus() como fonte única da verdade; falso positivo de conclusão estruturalmente impossível (41 testes + invariantes de máquina no smoke)
+- Consistência backend↔UI garantida por construção (UI consome run.derived persistido; markdown gerado da mesma derivação)
+- Resultado do smoke de produção: ver Worklog seguinte / scripts/smoke-poskli02-prod.log
+
+---
+Task ID: P02-VALIDAÇÃO
+Agent: main (Super Z — LEAD ENGINEER)
+Task: POSKLI 0.2 — validação real em produção (adversidade: rate limit B.AI real, freeze serverless, cancelamento)
+
+Work Log (evidência em .zscripts/browser-poskli02/ + scripts/smoke-poskli02-prod.log):
+- FIX bf99999 (2º commit): recoverStaleRun agora gera o relatório markdown (deriveResultMarkdown) e persiste o reviewResult efetivo — lacunas reveladas PELA validação de produção (run congelado recuperado sem relatório/snapshot); deploy ai-development-studio-qd18fllta READY
+- PRODUÇÃO — 5 runs reais, todos com derivação honesta e JAMAIS falso positivo:
+  · A1 (xukgr0vt) rate limit BAI logo no início → FAILED · PROVIDER_RATE_LIMIT · CRITÉRIO_TASKS_FALHOU — 16/16 invariantes ✔ (incluindo o caso §10 REAL: implementação FAILED + npm test SUCCESS → FAILED, não CONCLUÍDO)
+  · B (b3v06t81) teste impossível pré-criado (1+1===3): implementação 2/2 concluída, npm test exit 1 REAL; run congelou em CORRECTING (chamada BAI pendurada + suspensão serverless); recuperação stale → FAILED · CRITÉRIO_TESTS_FALHOU · criteria: tests:FAIL, lifecycle:BLOCKED, corrections 0/1 aplicada (STARTED) — §10 validado via caminho de recuperação
+  · A2 (xob681eo) coding queimou 51.914 tokens e levou 429 → FAILED com review BLOCKED (PROVIDER_RATE_LIMIT, política sem failover registrada na evidência) — 16/16 ✔
+  · cancel mid-run (cmtpi7dyv) → CANCELLED, nunca COMPLETED, sem derivação de sucesso ✔
+  · A3 (yg25yd97) freeze em IMPLEMENTING (17 min) → recuperação stale com o fix → PARTIAL · CONCLUSÃO_PARCIAL · 16/16 ✔ — resumo: "Parte do trabalho foi concluída (1/2 tarefas), mas há etapas bloqueadas: testes necessários não foram executados; revisão obrigatória não executada; execução interrompida" + markdown presente + reviewResult NOT_RUN persistido (fix validado em produção)
+- BROWSER REAL (Playwright, gamma): 13/13 ✔ — painel 0.2 renderiza critérios com evidências (✗ Tarefas FAIL · ✓ Testes · ⊘ Revisão BLOCKED com política de rate limit · ✓ Verificação 2/2), contadores reais (0/2 · 1 falhou · 1 bloqueada — JAMAIS arredondado), markdown renderizado (sem código bruto), zero internals do provedor na UI normal, zero chain-of-thought
+- Runtime logs produção: ZERO erros 5xx/exception em toda a janela de testes
+- LIMITAÇÃO EXTERNA HONESTA: cota da conta B.AI do usuário esgotada pelos testes de hoje (5 pipelines completos, ~150-200k tokens) → run de SUCESSO completo (COMPLETED) não demonstrável HOJE; caminho SUCCESS coberto por 11 testes unitários (cenário §21 da spec) e a camada LLM é a mesma da FASE 2 que completou runs reais ontem (22:22-22:37, múltiplos COMPLETED com ~70k tokens) — quando a cota se recupera, um run normal conclui e deriveFinalStatus exige TODOS os critérios PASS antes de COMPLETED
+- Processo em background do smoke foi morto pelo sandbox → harness em foreground com subcomandos (start/check/clean) + state file; cleanup só após terminal (deleção de projeto em cascata matava o run ativo — corrigido)
+- Incidente operacional: cleanup prematuro do cenário B deletou o projeto com run ATIVO (cascade) — nenhuma consequência além da perda do run de teste; harness corrigido
+
+Stage Summary:
+- POSKLI 0.2 VALIDADO EM PRODUÇÃO SOB ADVERSIDADE REAL: rate limit, freeze de função, cancelamento e teste impossível — em TODOS os casos o estado final foi honesto (FAILED/PARTIAL/CANCELLED com critérios e evidências); falso positivo de conclusão é estruturalmente impossível (demonstrado 3× via caso §10 real)
+- Commits: 351e3ad (núcleo+orquestrador+UI+41 testes) + bf99999 (fix recuperação) — 2 commits, 2 deploys READY; produção https://ai-development-studio-gamma.vercel.app
+- 41/41 testes unitários · 16/16 invariantes × 3 runs · 13/13 browser · 0 erros 5xx
+- Pronto para uso; sucesso pleno (COMPLETED) sujeito à janela de cota B.AI (limitação externa, não do código)
