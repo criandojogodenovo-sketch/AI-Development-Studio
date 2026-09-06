@@ -1,10 +1,15 @@
 'use client'
 
 // ============================================================
-// POSKLI PANEL — painel de execução do orquestrador
-// Estágios (● em execução ✓ concluído ○ pendente), contador de
-// tarefas, iteração, tempo, tokens, detalhes expandíveis.
-// Sem chain-of-thought: só progresso operacional e resultados.
+// POSKLI PANEL 0.2 — painel do orquestrador
+//
+// Hierarquia (spec §36):
+//   STATUS GLOBAL → PROGRESSO → ETAPAS → TAREFAS →
+//   EXECUÇÕES → EVIDÊNCIAS
+//
+// A UI NUNCA inventa estado: tudo vem do backend
+// (run.state + run.derived = deriveFinalStatus persistido).
+// Sem chain-of-thought: só progresso operacional e evidências.
 // ============================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -17,7 +22,7 @@ import { statusColor, statusLabel, formatDuration, timeAgo } from './ui-helpers'
 import {
   Brain, ListTodo, Hammer, FlaskConical, SearchCheck, Wrench, BadgeCheck,
   Circle, CheckCircle2, XCircle, Loader2, Square, ChevronDown, ChevronRight,
-  Timer, Repeat2, Coins, FileTerminal,
+  Timer, Repeat2, Coins, FileTerminal, ShieldQuestion, Ban, CircleAlert,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -28,6 +33,60 @@ interface StageEntry {
   finishedAt?: string
   durationMs?: number
   summary?: string
+}
+
+interface Criterion {
+  id: string
+  label: string
+  status: 'PASS' | 'FAIL' | 'BLOCKED'
+  evidence: string
+}
+
+interface Derived {
+  state: 'SUCCESS' | 'FAILED' | 'BLOCKED' | 'PARTIAL' | 'CANCELLED'
+  reason: string
+  summary: string
+  criteria: Criterion[]
+  counters: {
+    tasks: { total: number; completed: number; failed: number; blocked: number; pending: number }
+    corrections: { necessary: boolean; planned: number; applied: number; failed: number }
+    tests: { runs: number; passed: number; failed: number; lastStatus: string | null }
+    review: string
+  }
+  conservative: boolean
+  derivedAt: string
+}
+
+interface TestRecord {
+  id: string
+  executionId: string
+  command: string
+  status: 'PASS' | 'FAIL'
+  exitCode: number | null
+  trigger: string
+  ts: string
+  durationMs?: number
+}
+
+interface CorrectionRecord {
+  id: string
+  attempt: number
+  trigger: string
+  state: 'PLANNED' | 'STARTED' | 'COMPLETED' | 'FAILED' | 'BLOCKED'
+  startedAt: string
+  finishedAt?: string
+  evidence?: string
+  errorCode?: string
+}
+
+interface ReviewResult {
+  status: 'NOT_RUN' | 'PASS' | 'CHANGES_REQUESTED' | 'FAILED' | 'BLOCKED'
+  verdict?: string
+  issues?: unknown[]
+  summary?: string
+  blockedReason?: string
+  attempts: number
+  ts?: string
 }
 
 interface PoskliRunInfo {
@@ -45,11 +104,17 @@ interface PoskliRunInfo {
   error?: string | null
   result?: string | null
   stages: StageEntry[] | null
+  derived?: Derived | null
+  testRecords?: TestRecord[] | null
+  corrections?: CorrectionRecord[] | null
+  reviewResult?: ReviewResult | null
+  errorCode?: string | null
+  outcomeReason?: string | null
 }
 
 interface TaskInfo {
   id: string; order: number; title: string; status: string; agentRole: string
-  attempts: number; error?: string; result?: string
+  attempts: number; maxAttempts: number; error?: string; result?: string
 }
 
 interface ExecutionInfo {
@@ -77,10 +142,37 @@ const STAGE_LABELS: Record<string, string> = {
   VERIFYING: 'Verificando',
   COMPLETED: 'Concluído',
   FAILED: 'Falhou',
+  BLOCKED: 'Bloqueado',
+  PARTIAL: 'Parcial',
   CANCELLED: 'Cancelado',
 }
 
-const STAGE_ORDER = ['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'VERIFYING']
+const STAGE_ORDER = ['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'CORRECTING', 'VERIFYING']
+const TERMINAL_STATES = ['COMPLETED', 'FAILED', 'BLOCKED', 'PARTIAL', 'CANCELLED']
+const ACTIVE_STATES = ['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'CORRECTING', 'VERIFYING']
+
+const TRIGGER_LABELS: Record<string, string> = {
+  INITIAL: 'execução inicial',
+  AFTER_CORRECTION: 'após correção',
+  POST_REVIEW: 'pós-revisão',
+  FINAL: 'verificação final',
+}
+
+const CORRECTION_LABELS: Record<string, string> = {
+  PLANNED: 'Planejada',
+  STARTED: 'Iniciada',
+  COMPLETED: 'Concluída',
+  FAILED: 'Falhou',
+  BLOCKED: 'Bloqueada',
+}
+
+const REVIEW_LABELS: Record<string, string> = {
+  NOT_RUN: 'não executada',
+  PASS: 'aprovada',
+  CHANGES_REQUESTED: 'solicitou mudanças',
+  FAILED: 'reprovada',
+  BLOCKED: 'bloqueada',
+}
 
 export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill?: string | null }): React.ReactElement {
   const { api } = useStudio()
@@ -100,7 +192,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
     }
   }, [prefill])
 
-  const isActive = run ? ['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'CORRECTING', 'VERIFYING'].includes(run.state) : false
+  const isActive = run ? ACTIVE_STATES.includes(run.state) : false
 
   const load = useCallback(async () => {
     try {
@@ -110,7 +202,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
       if (latest) {
         const detail = await api<{ run: PoskliRunInfo; tasks: TaskInfo[]; executions: ExecutionInfo[] }>(`/api/poskli/${latest.id}`)
         setRun(detail.run)
-        setTasks(detail.tasks)
+        setTasks(detail.tasks.filter((t) => t.status !== 'CANCELLED'))
         setExecs(detail.executions)
       } else {
         setTasks([])
@@ -168,9 +260,41 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
   const activeStage = run?.state && isActive ? run.state : null
   const completedStages = new Set(timeline.filter((s) => s.state === 'DONE').map((s) => s.stage))
 
+  // ---- CONTADORES: sempre dos dados reais (derived quando existe; live senão) ----
+  const counters = useMemo(() => {
+    if (run?.derived) return run.derived.counters
+    const testRecords = run?.testRecords ?? []
+    const corrections = run?.corrections ?? []
+    const last = testRecords[testRecords.length - 1]
+    return {
+      tasks: {
+        total: tasks.length,
+        completed: tasks.filter((t) => t.status === 'COMPLETED').length,
+        failed: tasks.filter((t) => t.status === 'FAILED').length,
+        blocked: tasks.filter((t) => t.status === 'BLOCKED').length,
+        pending: tasks.filter((t) => ['PENDING', 'RUNNING', 'REVIEWING'].includes(t.status)).length,
+      },
+      corrections: {
+        necessary: testRecords.some((t) => t.status === 'FAIL') || run?.reviewResult?.status === 'CHANGES_REQUESTED',
+        planned: corrections.length,
+        applied: corrections.filter((c) => c.state === 'COMPLETED').length,
+        failed: corrections.filter((c) => c.state === 'FAILED' || c.state === 'BLOCKED').length,
+      },
+      tests: {
+        runs: testRecords.length,
+        passed: testRecords.filter((t) => t.status === 'PASS').length,
+        failed: testRecords.filter((t) => t.status === 'FAIL').length,
+        lastStatus: last ? last.status : null,
+      },
+      review: run?.reviewResult?.status ?? 'NOT_RUN',
+    }
+  }, [run, tasks])
+
+  const derived = run?.derived ?? null
+
   return (
     <div className="flex flex-col h-full min-h-0 bg-zinc-950/80">
-      {/* command bar */}
+      {/* 1) STATUS GLOBAL + comando */}
       <div className="p-3 border-b border-zinc-800/60 shrink-0 space-y-2">
         <div className="flex items-center gap-2">
           <span className="w-6 h-6 rounded-md bg-emerald-600/15 border border-emerald-800/60 flex items-center justify-center shrink-0">
@@ -178,8 +302,13 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
           </span>
           <span className="text-xs font-bold tracking-wide">POSKLI</span>
           {run && (
-            <Badge variant="outline" className={`${statusColor(poskliBadgeState(run))} scale-90`}>
+            <Badge variant="outline" className={`${statusColor(badgeState(run))} scale-90`}>
               {STAGE_LABELS[run.state] ?? run.state}
+            </Badge>
+          )}
+          {run?.errorCode && !isActive && (
+            <Badge variant="outline" className="bg-orange-500/15 text-orange-400 border-orange-500/30 scale-[0.85]">
+              {run.errorCode === 'PROVIDER_RATE_LIMIT' ? 'limite do provedor' : 'erro classificado'}
             </Badge>
           )}
           {isActive && (
@@ -219,22 +348,28 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
             <Brain className="w-10 h-10 mx-auto text-zinc-700" />
             <p className="text-sm text-zinc-400">Nenhuma execução ainda</p>
             <p className="text-[11px] text-zinc-600 max-w-64 mx-auto">
-              O Poskli planeja, implementa, testa no terminal real, revisa e corrige até os testes passarem.
+              O Poskli planeja, implementa, testa no terminal real, revisa e corrige — e só declara conclusão quando todos os critérios têm evidência.
             </p>
           </div>
         )}
 
         {run && (
           <div className="p-3 space-y-3">
-            {/* metadados */}
-            <div className="flex flex-wrap items-center gap-3 text-[10px] text-zinc-500">
+            {/* 2) PROGRESSO — contadores derivados dos dados reais */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-500">
               <span className="flex items-center gap-1"><Timer className="w-3 h-3" />{formatDuration(run.finishedAt ? new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime() : Date.now() - new Date(run.startedAt).getTime())}</span>
-              <span className="flex items-center gap-1"><Repeat2 className="w-3 h-3" />correção {run.iteration}/{run.maxIterations}</span>
+              <span className="flex items-center gap-1"><ListTodo className="w-3 h-3" />{counters.tasks.completed}/{counters.tasks.total} tarefas</span>
+              <span className="flex items-center gap-1"><Repeat2 className="w-3 h-3" />{counters.corrections.applied}/{counters.corrections.planned || (counters.corrections.necessary ? 1 : 0)} correções aplicadas</span>
+              {counters.tests.lastStatus && (
+                <span className={`flex items-center gap-1 ${counters.tests.lastStatus === 'PASS' ? 'text-emerald-500' : 'text-red-400'}`}>
+                  <FlaskConical className="w-3 h-3" />testes: {counters.tests.lastStatus === 'PASS' ? 'PASS' : 'FAIL'} ({counters.tests.runs} exec.)
+                </span>
+              )}
               <span className="flex items-center gap-1"><Coins className="w-3 h-3" />{(run.tokensIn + run.tokensOut).toLocaleString('pt-BR')} tokens</span>
               <span className="ml-auto">{timeAgo(run.startedAt)}</span>
             </div>
 
-            {/* pipeline de estágios */}
+            {/* 3) ETAPAS */}
             <div className="space-y-1">
               {STAGE_ORDER.map((stage) => {
                 const Icon = STAGE_ICONS[stage] ?? Circle
@@ -273,16 +408,25 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
                   </div>
                 )
               })}
-              {/* estados terminais */}
-              {['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.state) && (
+              {/* estado terminal — SEMPRE do backend */}
+              {TERMINAL_STATES.includes(run.state) && (
                 <div className={`flex items-center gap-2.5 px-2 py-2 rounded-lg border ${
-                  run.state === 'COMPLETED' ? 'border-emerald-900/50 bg-emerald-950/30' : run.state === 'CANCELLED' ? 'border-zinc-800 bg-zinc-900/40' : 'border-red-900/50 bg-red-950/30'
+                  run.state === 'COMPLETED' ? 'border-emerald-900/50 bg-emerald-950/30'
+                    : run.state === 'PARTIAL' ? 'border-amber-900/50 bg-amber-950/20'
+                      : run.state === 'BLOCKED' ? 'border-orange-900/50 bg-orange-950/20'
+                        : run.state === 'CANCELLED' ? 'border-zinc-800 bg-zinc-900/40'
+                          : 'border-red-900/50 bg-red-950/30'
                 }`}>
                   {run.state === 'COMPLETED' ? <BadgeCheck className="w-4 h-4 text-emerald-400" />
-                    : run.state === 'CANCELLED' ? <Square className="w-4 h-4 text-zinc-400" />
-                    : <XCircle className="w-4 h-4 text-red-400" />}
+                    : run.state === 'PARTIAL' ? <CircleAlert className="w-4 h-4 text-amber-400" />
+                      : run.state === 'BLOCKED' ? <ShieldQuestion className="w-4 h-4 text-orange-400" />
+                        : run.state === 'CANCELLED' ? <Square className="w-4 h-4 text-zinc-400" />
+                          : <XCircle className="w-4 h-4 text-red-400" />}
                   <span className="text-xs font-semibold">{STAGE_LABELS[run.state]}</span>
-                  <span className="ml-auto flex gap-1.5">
+                  {derived?.summary && (
+                    <span className="text-[10px] text-zinc-500 truncate flex-1 min-w-0" title={derived.summary}>{derived.summary}</span>
+                  )}
+                  <span className="ml-auto flex gap-1.5 shrink-0">
                     {run.testsPassed && <Badge variant="outline" className="bg-emerald-600/15 text-emerald-400 border-emerald-600/30 scale-90">testes OK</Badge>}
                     {run.previewOk && run.testsPassed && <Badge variant="outline" className="bg-emerald-600/15 text-emerald-400 border-emerald-600/30 scale-90">preview OK</Badge>}
                   </span>
@@ -301,7 +445,54 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
 
             {detailsOpen && (
               <div className="space-y-2">
-                {/* tarefas */}
+                {/* 6) EVIDÊNCIAS — critérios da derivação (fonte única da verdade) */}
+                {derived && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Critérios de conclusão</p>
+                    <div className="px-2 py-2 rounded-lg bg-zinc-900/40 border border-zinc-800/40 space-y-1">
+                      {derived.criteria.map((c) => (
+                        <div key={c.id} className="flex items-start gap-2">
+                          <span className="shrink-0 mt-0.5">
+                            {c.status === 'PASS' ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                              : c.status === 'FAIL' ? <XCircle className="w-3.5 h-3.5 text-red-400" />
+                                : <ShieldQuestion className="w-3.5 h-3.5 text-orange-400" />}
+                          </span>
+                          <div className="min-w-0">
+                            <span className={`text-[11px] font-medium ${c.status === 'PASS' ? 'text-zinc-300' : c.status === 'FAIL' ? 'text-red-300' : 'text-orange-300'}`}>
+                              {c.label}
+                            </span>
+                            <p className="text-[10px] text-zinc-500 break-words">{c.evidence}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* revisão */}
+                {run.reviewResult && run.reviewResult.status !== 'NOT_RUN' && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Revisão</p>
+                    <div className="px-2 py-1.5 rounded-lg bg-zinc-900/40 border border-zinc-800/40">
+                      <div className="flex items-center gap-2">
+                        <SearchCheck className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                        <span className="text-[11px] text-zinc-300">{REVIEW_LABELS[run.reviewResult.status] ?? run.reviewResult.status}</span>
+                        {run.reviewResult.blockedReason && (
+                          <Badge variant="outline" className="bg-orange-500/15 text-orange-400 border-orange-500/30 scale-[0.85]">{run.reviewResult.blockedReason}</Badge>
+                        )}
+                        <span className="text-[9px] text-zinc-600 ml-auto">{run.reviewResult.attempts} tentativa(s)</span>
+                      </div>
+                      {run.reviewResult.summary && (
+                        <details className="mt-1 pl-5">
+                          <summary className="text-[9px] text-zinc-600 cursor-pointer hover:text-zinc-400">detalhes da revisão</summary>
+                          <p className="mt-1 text-[10px] text-zinc-500 whitespace-pre-wrap break-words">{run.reviewResult.summary.slice(0, 600)}</p>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 4) TAREFAS */}
                 {tasks.length > 0 && (
                   <div className="space-y-1">
                     <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Tarefas</p>
@@ -314,6 +505,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
                         <div className="flex items-center gap-2">
                           <span className="text-[9px] text-zinc-600 font-mono w-5 shrink-0">#{String(t.order + 1).padStart(2, '0')}</span>
                           <span className="text-[11px] text-zinc-300 flex-1 truncate">{t.title}</span>
+                          {t.attempts > 1 && <span className="text-[9px] text-amber-500/80 shrink-0">tentativa {t.attempts}/{t.maxAttempts + 1}</span>}
                           <Badge variant="outline" className={`${statusColor(t.status)} scale-[0.85] shrink-0`}>{statusLabel(t.status)}</Badge>
                         </div>
                         {expandedTask === t.id && (
@@ -327,11 +519,61 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
                   </div>
                 )}
 
-                {/* execuções reais */}
-                {execs.length > 0 && (
+                {/* correções (registros com estado individual) */}
+                {(run.corrections?.length ?? 0) > 0 && (
                   <div className="space-y-1">
-                    <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Execuções (terminal real)</p>
-                    {execs.map((e) => (
+                    <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Correções ({counters.corrections.applied}/{run.corrections!.length} aplicadas)</p>
+                    {run.corrections!.map((c) => (
+                      <div key={c.id} className="px-2 py-1.5 rounded-lg bg-zinc-900/40 border border-zinc-800/40">
+                        <div className="flex items-center gap-2">
+                          <Wrench className={`w-3 h-3 shrink-0 ${c.state === 'COMPLETED' ? 'text-emerald-500' : c.state === 'BLOCKED' ? 'text-orange-400' : c.state === 'FAILED' ? 'text-red-400' : 'text-zinc-500'}`} />
+                          <span className="text-[10px] text-zinc-400">Correção #{c.attempt}</span>
+                          <span className="text-[9px] text-zinc-600">{c.trigger === 'TEST_FAILURE' ? 'falha de testes' : 'revisão solicitou mudanças'}</span>
+                          <Badge variant="outline" className={`${statusColor(c.state === 'COMPLETED' ? 'COMPLETED' : c.state === 'BLOCKED' ? 'BLOCKED' : c.state === 'STARTED' ? 'RUNNING' : 'FAILED')} scale-[0.8] ml-auto shrink-0`}>
+                            {CORRECTION_LABELS[c.state] ?? c.state}
+                          </Badge>
+                        </div>
+                        {c.evidence && <p className="text-[9.5px] text-zinc-600 mt-0.5 pl-5 break-words">{c.evidence}</p>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 5) EXECUÇÕES reais (testes com identidade — dedup por id) */}
+                {(run.testRecords?.length ?? 0) > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Testes executados ({run.testRecords!.length})</p>
+                    {run.testRecords!.map((t) => {
+                      const exec = execs.find((e) => e.id === t.executionId)
+                      return (
+                        <div key={t.id} className="px-2 py-1.5 rounded-lg bg-zinc-900/40 border border-zinc-800/40">
+                          <div className="flex items-center gap-2 text-[10px] font-mono">
+                            {t.status === 'PASS' ? <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" /> : <XCircle className="w-3 h-3 text-red-400 shrink-0" />}
+                            <span className="text-zinc-300 truncate flex-1">{t.command}</span>
+                            <span className="text-[9px] text-zinc-600 shrink-0">{TRIGGER_LABELS[t.trigger] ?? t.trigger}</span>
+                            <Badge variant="outline" className={`${t.status === 'PASS' ? 'bg-emerald-600/15 text-emerald-400 border-emerald-600/30' : 'bg-red-500/15 text-red-400 border-red-500/30'} scale-[0.8] shrink-0`}>
+                              {t.status} {t.exitCode !== null ? `(${t.exitCode})` : ''}
+                            </Badge>
+                          </div>
+                          {exec && (exec.stderr || exec.stdout) && (
+                            <details className="mt-1 pl-5">
+                              <summary className="text-[9px] text-zinc-600 cursor-pointer hover:text-zinc-400">saída</summary>
+                              <pre className="mt-1 max-h-32 overflow-y-auto text-[9.5px] font-mono whitespace-pre-wrap break-words text-zinc-500">
+                                {exec.stderr ? <span className="text-red-400">{exec.stderr.slice(0, 2000)}</span> : exec.stdout?.slice(0, 2000)}
+                              </pre>
+                            </details>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {/* outras execuções (build etc.) */}
+                {execs.filter((e) => !run.testRecords?.some((t) => t.executionId === e.id)).length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1">Outras execuções (terminal real)</p>
+                    {execs.filter((e) => !run.testRecords?.some((t) => t.executionId === e.id)).map((e) => (
                       <div key={e.id} className="px-2 py-1.5 rounded-lg bg-zinc-900/40 border border-zinc-800/40">
                         <div className="flex items-center gap-2 text-[10px] font-mono">
                           <FileTerminal className="w-3 h-3 text-emerald-500 shrink-0" />
@@ -351,7 +593,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
                   </div>
                 )}
 
-                {/* resultado markdown */}
+                {/* resultado markdown (gerado da MESMA derivação) */}
                 {run.result && (
                   <Card className="border-zinc-800/60 bg-zinc-900/40">
                     <CardContent className="p-2.5">
@@ -376,9 +618,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
   )
 }
 
-function poskliBadgeState(run: PoskliRunInfo): string {
-  if (run.state === 'COMPLETED') return 'COMPLETED'
-  if (run.state === 'FAILED') return 'FAILED'
-  if (run.state === 'CANCELLED') return 'CANCELLED'
+function badgeState(run: PoskliRunInfo): string {
+  if (TERMINAL_STATES.includes(run.state)) return run.state
   return 'RUNNING'
 }

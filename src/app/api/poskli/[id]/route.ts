@@ -28,14 +28,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const progress = await db.task.findMany({
     where: { projectId: run.projectId },
     orderBy: { order: 'asc' },
-    select: { id: true, order: true, title: true, status: true, agentRole: true, attempts: true, error: true, result: true },
+    select: { id: true, order: true, title: true, description: true, status: true, agentRole: true, priority: true, attempts: true, maxAttempts: true, error: true, result: true },
     take: 20,
   }).catch(() => [])
 
   const executions = await db.execution.findMany({
     where: { projectId: run.projectId, source: 'poskli' },
     orderBy: { startedAt: 'asc' },
-    take: 10,
+    take: 20,
     select: {
       id: true, command: true, status: true, exitCode: true, durationMs: true,
       stdout: true, stderr: true, startedAt: true,
@@ -54,7 +54,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   const run = await ownedRun(id, user.id)
   if (!run) return NextResponse.json({ error: 'RUN_NÃO_ENCONTRADO' }, { status: 404 })
 
-  const finished = ['COMPLETED', 'FAILED', 'CANCELLED']
+  const finished = ['COMPLETED', 'FAILED', 'CANCELLED', 'BLOCKED', 'PARTIAL']
   if (finished.includes(run.state)) {
     return NextResponse.json({ ok: false, message: 'Run já finalizado', state: run.state })
   }

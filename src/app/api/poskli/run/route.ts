@@ -2,7 +2,7 @@ import { NextResponse, after } from 'next/server'
 import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitAgentRun, rateLimitApi, clientIp } from '@/lib/studio/security/rate-limit'
-import { startPoskli, runPoskli } from '@/lib/studio/poskli/orchestrator'
+import { startPoskli, runPoskli, recoverStaleRun } from '@/lib/studio/poskli/orchestrator'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -41,17 +41,17 @@ export async function POST(req: Request) {
   })
   if (active) {
     const staleMs = 10 * 60 * 1000
+    // última atividade REAL (updatedAt muda a cada estágio/persistência —
+    // antes usava startedAt duas vezes, bug que marcava runs vivos como travados)
     const lastActivity = Math.max(
       new Date(active.startedAt).getTime(),
-      new Date(active.startedAt).getTime()
+      new Date(active.updatedAt).getTime()
     )
     if (Date.now() - lastActivity < staleMs) {
       return NextResponse.json({ error: 'POSKLI_JÁ_ATIVO neste projeto', runId: active.id }, { status: 409 })
     }
-    await db.poskliRun.update({
-      where: { id: active.id },
-      data: { state: 'FAILED', error: 'Run anterior travou (inatividade) — recuperado automaticamente', finishedAt: new Date() },
-    }).catch(() => {})
+    // recuperação HONESTA: deriva estado conservador (interrompido ≠ concluído)
+    await recoverStaleRun(active.id).catch(() => {})
   }
 
   const { runId } = await startPoskli({ projectId, userId: user.id, request, maxIterations: Number(body.maxIterations) || 3 })
@@ -80,7 +80,8 @@ export async function GET(req: Request) {
     select: {
       id: true, request: true, state: true, iteration: true, maxIterations: true,
       testsPassed: true, previewOk: true, tokensIn: true, tokensOut: true,
-      startedAt: true, finishedAt: true, error: true,
+      errorCode: true, outcomeReason: true,
+      startedAt: true, finishedAt: true, updatedAt: true, error: true,
     },
   })
   return NextResponse.json({ runs })

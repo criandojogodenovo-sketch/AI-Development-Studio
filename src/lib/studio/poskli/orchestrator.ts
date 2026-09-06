@@ -1,23 +1,24 @@
 // ============================================================
-// POSKLI 0.1 — ORQUESTRADOR DE AGENTES
+// POSKLI 0.2 — ORQUESTRADOR DE AGENTES
 //
-// USER → POSKLI ORCHESTRATOR → PLANNER → ENGINEER → TESTER
-//      → REVIEWER → CORRECTION → FINAL VERIFICATION
+// USER → POSKLI ORCHESTRATOR (CONTROLADO)
+//        → PLANNER (análise/plano)
+//        → ENGINEER/Qwen (implementação)
+//        → TESTER (testes REAIS no Execution Engine)
+//        → REVIEWER/HY3 (revisão com evidências)
+//        → CORRECTION (alimentada pela SAÍDA REAL dos testes)
+//        → FINAL VERIFICATION (checklist determinístico)
+//        → deriveFinalStatus()  ← FONTE ÚNICA DA VERDADE
+//
+// REGRA ABSOLUTA (0.2):
+//   "CONCLUÍDO" somente quando deriveFinalStatus() derivar SUCCESS
+//   dos critérios REAIS (tarefas/testes/revisão/correções/verificação).
+//   Terminou de executar ≠ concluiu. NUNCA mascarar erro como sucesso.
 //
 // Estados visíveis ao usuário:
 //   ANALYZING → PLANNING → IMPLEMENTING → TESTING →
 //   (CORRECTING → TESTING)* → REVIEWING → VERIFYING →
-//   COMPLETED | FAILED | CANCELLED
-//
-// DIFERENCIAL REAL:
-//   - TESTES rodam no EXECUTION ENGINE (comandos de verdade,
-//     registrados em Execution com stdout/stderr completos)
-//   - CORREÇÃO alimenta o Engineer com a SAÍDA REAL dos testes
-//     (arquivo/linha/erro), não com autodiagnóstico do modelo
-//   - VERIFICAÇÃO FINAL: testes verdes + preview servindo
-//   - Limites duros: MAX_ITERATIONS, MAX_TASKS, MAX_EXECUTIONS,
-//     TIMEOUT (clamp serverless 270s) — NUNCA loop infinito
-//   - Sem chain-of-thought: progresso operacional + resultados
+//   COMPLETED | FAILED | BLOCKED | PARTIAL | CANCELLED
 // ============================================================
 
 import { db } from '@/lib/db'
@@ -27,19 +28,26 @@ import { runAgent, extractJson } from '../agents/base'
 import {
   readProjectMemory, memoryToPrompt, updateProjectMemory, selectRelevantFiles,
 } from '../context/context-manager'
-import { createTasksFromPlan, projectProgress, transitionTask, readyTasks } from '../orchestrator/task-graph'
+import { createTasksFromPlan, transitionTask, readyTasks } from '../orchestrator/task-graph'
 import { emitEvent } from '../events/bus'
 import { ensureMaterialized, syncBackToDb } from '../workspace/sync'
 import { workspaceProvider } from '../workspace/db-provider'
 import { runExecution } from '../execution/engine'
 import { getTemplate } from '../projects/templates'
+import {
+  deriveFinalStatus, deriveResultMarkdown, buildVerificationChecks, phaseLabel,
+  displayFromGlobal,
+  type DeriveFinalStatusInput, type DeriveFinalStatusResult, type TaskSnapshot,
+  type TestRecordSnapshot, type CorrectionSnapshot, type ReviewSnapshot, type VerificationResult,
+} from './state-machine'
+import { classifyError, rateLimitRecord, type PoskliErrorCode } from './errors'
 
 // ---------- TIPOS ----------
 
 export type PoskliState =
   | 'ANALYZING' | 'PLANNING' | 'IMPLEMENTING' | 'TESTING'
   | 'REVIEWING' | 'CORRECTING' | 'VERIFYING'
-  | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  | 'COMPLETED' | 'FAILED' | 'BLOCKED' | 'PARTIAL' | 'CANCELLED'
 
 export interface StageEntry {
   stage: PoskliState
@@ -64,6 +72,29 @@ interface TestOutcome {
   command: string
   stdout: string
   stderr: string
+  exitCode: number | null
+  status: string
+}
+
+/** Registro de teste com IDENTIDADE (spec §11/§23) — persistido em run.testRecords. */
+interface TestRecord extends TestRecordSnapshot {
+  durationMs?: number
+}
+
+/** Registro de correção com estado individual (spec §15) — persistido em run.corrections. */
+interface CorrectionRecord extends CorrectionSnapshot {
+  startedAt: string
+  finishedAt?: string
+  evidence?: string
+  errorCode?: PoskliErrorCode
+}
+
+/** Snapshot da revisão (spec §5/§13) — persistido em run.reviewResult. */
+interface ReviewResult extends ReviewSnapshot {
+  issues?: unknown[]
+  summary?: string
+  rateLimit?: ReturnType<typeof rateLimitRecord>
+  ts?: string
 }
 
 interface PoskliContext {
@@ -79,9 +110,19 @@ interface PoskliContext {
   maxIterations: number
   evidence: string[]
   plan: Plan
+  /** Registros com identidade (nunca duplicados por re-render/polling). */
+  testRecords: TestRecord[]
+  corrections: CorrectionRecord[]
+  review: ReviewResult
+  /** AgentRuns executados nesta sessão (auditoria de artefatos). */
+  agentRunIds: string[]
+  /** Classificação do erro mais significativo (taxonomia §31). */
+  errorCode?: PoskliErrorCode
 }
 
 const MAX_TASKS = 8
+const MAX_REVIEW_ATTEMPTS = 2
+const FILE_WRITE_TOOLS = ['create_file', 'modify_file', 'create_directory']
 
 const STATE_LABELS: Record<PoskliState, string> = {
   ANALYZING: 'Analisando',
@@ -93,6 +134,8 @@ const STATE_LABELS: Record<PoskliState, string> = {
   VERIFYING: 'Verificação final',
   COMPLETED: 'Concluído',
   FAILED: 'Falhou',
+  BLOCKED: 'Bloqueado',
+  PARTIAL: 'Parcial',
   CANCELLED: 'Cancelado',
 }
 
@@ -130,7 +173,7 @@ async function stage<T>(ctx: PoskliContext, stageName: PoskliState, fn: () => Pr
     return result
   } catch (e) {
     entry.state = 'FAILED'
-    entry.summary = (e as Error).message.slice(0, 400)
+    entry.summary = classifyError(e).friendly.slice(0, 400)
     throw e
   } finally {
     entry.finishedAt = new Date().toISOString()
@@ -167,6 +210,18 @@ async function testCommandFor(projectId: string, projectType: string): Promise<s
   return template?.testCommand ?? 'node --test test/'
 }
 
+/** Existe script de build aplicável? (spec §17: "quando aplicável") */
+async function buildCommandFor(projectId: string): Promise<string | null> {
+  try {
+    const pkgFile = await workspaceProvider.readFile(projectId, 'package.json')
+    if (pkgFile && pkgFile.encoding === 'utf8') {
+      const pkg = JSON.parse(pkgFile.content) as { scripts?: Record<string, string> }
+      if (pkg.scripts?.build && !pkg.scripts.build.includes('echo')) return 'npm run build'
+    }
+  } catch { /* sem package.json → não aplicável */ }
+  return null
+}
+
 /** Extrai pistas de arquivo/linha da saída REAL dos testes. */
 function extractFailureHints(stdout: string, stderr: string): string {
   const lines = `${stdout}\n${stderr}`.split('\n')
@@ -174,6 +229,17 @@ function extractFailureHints(stdout: string, stderr: string): string {
     .filter((l) => /error|fail|assert|expected|actual|✖|not ok|throw/i.test(l))
     .slice(0, 12)
   return hints.join('\n').slice(0, 2200) || '(sem detalhes de falha no output)'
+}
+
+/** Persiste registros com identidade (testes/correções) — a UI lê do DB. */
+async function persistRecords(ctx: PoskliContext): Promise<void> {
+  await db.poskliRun.update({
+    where: { id: ctx.runId },
+    data: {
+      testRecords: ctx.testRecords as unknown as object,
+      corrections: ctx.corrections as unknown as object,
+    },
+  }).catch(() => {})
 }
 
 // ---------- ESTÁGIOS ----------
@@ -200,7 +266,7 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
         '',
         'Analise o estado atual do projeto e produza um plano JSON:',
         '{"plan": {"architecture": "...", "stack": [...], "tasks": [{"title": "...", "description": "...", "agentRole": "coding|testing|review", "priority": "HIGH|MEDIUM|LOW", "dependsOn": [índices]}]}}',
-        'MÁXIMO 4 tarefas. Cada tarefa concreta e verificável por testes.',
+        'MÁXIMO 4 tarefas. Cada tarefa concreta e verificável por testes. Inclua SEMPRE uma tarefa de testes automatizados (agentRole "testing").',
       ].join('\n'),
       contextBlock: [
         `## PROJETO: ${project?.name} (tipo: ${project?.type})`,
@@ -213,6 +279,7 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
   )
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
+  ctx.agentRunIds.push(out.runId)
 
   const planJson = extractJson(out.result)
   let plan = (planJson?.plan as Plan) ?? null
@@ -246,7 +313,7 @@ async function implementTask(
     .slice(0, 16000)
 
   await transitionTask(task.id, 'RUNNING', { attempts: { increment: 1 }, input: { description: task.description, agentRole: task.agentRole, poskli: ctx.runId } as object })
-  await emitEvent({ type: 'task.started', projectId: ctx.projectId, taskId: task.id, agent: agent.id, message: `Poskli — implementando: ${task.title}` })
+  await emitEvent({ type: 'task.started', projectId: ctx.projectId, taskId: task.id, runId: ctx.runId, agent: agent.id, message: `Poskli — implementando: ${task.title}` })
 
   const out = await runAgent(
     {
@@ -269,10 +336,12 @@ async function implementTask(
   )
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
+  ctx.agentRunIds.push(out.runId)
   return { status: out.status, result: out.result }
 }
 
-async function runTestsStage(ctx: PoskliContext, label: string): Promise<TestOutcome> {
+/** Roda os testes REAIS no Execution Engine e registra TestRecord com identidade. */
+async function runTestsStage(ctx: PoskliContext, trigger: TestRecord['trigger']): Promise<TestOutcome> {
   const project = await db.project.findUnique({ where: { id: ctx.projectId }, select: { type: true } })
   const command = await testCommandFor(ctx.projectId, project?.type ?? 'EMPTY_PROJECT')
   ctx.executions++
@@ -289,6 +358,20 @@ async function runTestsStage(ctx: PoskliContext, label: string): Promise<TestOut
   await db.poskliRun.update({ where: { id: ctx.runId }, data: { lastExecId: res.executionId } }).catch(() => {})
   const passed = res.status === 'SUCCESS' && res.exitCode === 0
 
+  // ---- TestRecord com identidade estável (dedup na UI por id) ----
+  const record: TestRecord = {
+    id: `tst_${crypto.randomUUID().slice(0, 12)}`,
+    executionId: res.executionId,
+    command,
+    status: passed ? 'PASS' : 'FAIL',
+    exitCode: res.exitCode,
+    trigger,
+    ts: new Date().toISOString(),
+    durationMs: res.durationMs,
+  }
+  ctx.testRecords = [...ctx.testRecords, record]
+  await persistRecords(ctx)
+
   await emitEvent({
     type: passed ? 'test.passed' : 'test.failed',
     projectId: ctx.projectId,
@@ -296,40 +379,135 @@ async function runTestsStage(ctx: PoskliContext, label: string): Promise<TestOut
     agent: 'testing',
     tool: 'execution',
     status: passed ? 'OK' : 'ERROR',
-    message: `Poskli — testes ${passed ? 'PASSARAM' : 'FALHARAM'} (${label}): exit ${res.exitCode}`,
+    message: `Poskli — testes ${passed ? 'PASSARAM' : 'FALHARAM'} (${phaseLabel('TESTING')} #${ctx.testRecords.length}): exit ${res.exitCode}`,
     durationMs: res.durationMs,
+    data: { testRecordId: record.id, executionId: res.executionId, trigger, attempt: ctx.testRecords.length },
   })
-  return { passed, executionId: res.executionId, command, stdout: res.stdout, stderr: res.stderr }
+  return { passed, executionId: res.executionId, command, stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode, status: res.status }
 }
 
-async function reviewStage(ctx: PoskliContext): Promise<{ verdict: string; issues: unknown[]; summary: string }> {
+/**
+ * REVIEWING com classificação de erros e política de rate limit (spec §13).
+ * - BAI_RATE_LIMIT → revisão BLOCKED (failover NÃO aplicado por política)
+ *   → registrado objetivamente; NUNCA vira sucesso.
+ * - Timeout/erro transitório → 1 retry (limite MAX_REVIEW_ATTEMPTS).
+ */
+async function reviewStage(ctx: PoskliContext): Promise<ReviewResult> {
   const reviewAgent = getAgent('review')!
   const root = await ensureMaterialized(ctx.projectId)
-  const out = await runAgent(
-    {
-      agent: reviewAgent,
-      projectId: ctx.projectId,
-      workspaceRoot: root,
-      runType: 'REVIEW',
-      objective: [
-        `Revise a implementação do pedido: "${ctx.request.slice(0, 300)}"`,
-        '',
-        `Evidências coletadas:\n${ctx.evidence.slice(-6).map((e) => `- ${e}`).join('\n')}`,
-        '',
-        'Verifique com evidências reais (git_diff, run_tests, leitura de arquivos) e emita veredito JSON:',
-        '{"verdict": "APPROVE" | "CHANGES_REQUESTED", "issues": [...], "summary": "..."}',
-      ].join('\n'),
-      contextBlock: '',
-    },
-    16
-  )
-  ctx.tokens.in += out.tokensIn
-  ctx.tokens.out += out.tokensOut
+  let attempts = 0
+  let lastRaw = ''
 
-  const verdictJson = extractJson(out.result)
-  const verdict = String(verdictJson?.verdict ?? (out.result.includes('APPROVE') ? 'APPROVE' : 'CHANGES_REQUESTED'))
-  const issues = (verdictJson?.issues as unknown[]) ?? []
-  return { verdict, issues, summary: out.result.slice(0, 600) }
+  for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
+    attempts = attempt
+    const out = await runAgent(
+      {
+        agent: reviewAgent,
+        projectId: ctx.projectId,
+        workspaceRoot: root,
+        runType: 'REVIEW',
+        objective: [
+          `Revise a implementação do pedido: "${ctx.request.slice(0, 300)}"`,
+          '',
+          `Evidências coletadas:\n${ctx.evidence.slice(-6).map((e) => `- ${e}`).join('\n')}`,
+          '',
+          'Verifique com evidências reais (git_diff, run_tests, leitura de arquivos) e emita veredito JSON:',
+          '{"verdict": "APPROVE" | "CHANGES_REQUESTED", "issues": [...], "summary": "..."}',
+        ].join('\n'),
+        contextBlock: '',
+      },
+      16
+    )
+    ctx.tokens.in += out.tokensIn
+    ctx.tokens.out += out.tokensOut
+    ctx.agentRunIds.push(out.runId)
+    lastRaw = out.result
+
+    if (out.status === 'COMPLETED') {
+      const verdictJson = extractJson(out.result)
+      const verdict = String(verdictJson?.verdict ?? (out.result.includes('APPROVE') ? 'APPROVE' : 'CHANGES_REQUESTED'))
+      const issues = (verdictJson?.issues as unknown[]) ?? []
+      const result: ReviewResult = {
+        status: verdict === 'APPROVE' ? 'PASS' : 'CHANGES_REQUESTED',
+        verdict,
+        issues,
+        summary: out.result.slice(0, 600),
+        attempts,
+        ts: new Date().toISOString(),
+      }
+      await emitEvent({
+        type: verdict === 'APPROVE' ? 'review.approved' : 'review.changes_requested',
+        projectId: ctx.projectId,
+        runId: ctx.runId,
+        agent: 'review',
+        status: verdict,
+        message: verdict === 'APPROVE' ? 'Revisão aprovou a implementação' : 'Revisão solicitou mudanças',
+        data: { attempt, issues: issues.length },
+      })
+      return result
+    }
+
+    // ---- agente falhou: CLASSIFICAR (nunca mascarar) ----
+    const classified = classifyError(`${out.error ?? ''} ${out.result}`)
+
+    if (classified.code === 'PROVIDER_RATE_LIMIT') {
+      // Política: failover NÃO aplicado a rate limits → revisão BLOCKED
+      const rl = rateLimitRecord('REVIEWING', attempt, 'key#1', false, 'revisão bloqueada — sem failover para rate limit por política')
+      const blocked: ReviewResult = {
+        status: 'BLOCKED',
+        verdict: 'BLOCKED',
+        blockedReason: 'PROVIDER_RATE_LIMIT',
+        summary: 'Revisão bloqueada: limite de requisições do provedor de IA atingido.',
+        attempts,
+        rateLimit: rl,
+        ts: new Date().toISOString(),
+      }
+      ctx.errorCode = 'PROVIDER_RATE_LIMIT'
+      ctx.evidence.push('Revisão bloqueada: BAI_RATE_LIMIT (política: sem failover para rate limits)')
+      await emitEvent({
+        type: 'review.blocked',
+        projectId: ctx.projectId,
+        runId: ctx.runId,
+        agent: 'review',
+        status: 'BLOCKED',
+        message: 'Revisão bloqueada: limite de requisições do provedor — o resultado não será concluído sem revisão',
+        data: { code: 'PROVIDER_RATE_LIMIT', attempt, policy: rl.policy, retried: false },
+      })
+      return blocked
+    }
+
+    if (!classified.retryable || attempt >= MAX_REVIEW_ATTEMPTS) {
+      const failed: ReviewResult = {
+        status: 'FAILED',
+        verdict: 'FAILED',
+        summary: classified.friendly,
+        attempts,
+        ts: new Date().toISOString(),
+      }
+      ctx.errorCode = classified.code
+      ctx.evidence.push(`Revisão falhou: ${classified.code}`)
+      await emitEvent({
+        type: 'review.failed',
+        projectId: ctx.projectId,
+        runId: ctx.runId,
+        agent: 'review',
+        status: 'FAILED',
+        message: 'Não foi possível concluir a revisão — o resultado não será concluído sem revisão',
+        data: { code: classified.code, attempt },
+      })
+      return failed
+    }
+    // retryable → tentativa 2 (registrada)
+    ctx.evidence.push(`Revisão: tentativa ${attempt} falhou (${classified.code}) — reagindo com retry limitado`)
+  }
+
+  return {
+    status: 'FAILED',
+    verdict: 'FAILED',
+    summary: `Revisão não concluída após ${attempts} tentativas. ${lastRaw.slice(0, 200)}`,
+    attempts,
+    ts: new Date().toISOString(),
+  }
 }
 
 async function verifyPreview(ctx: PoskliContext): Promise<boolean> {
@@ -338,6 +516,123 @@ async function verifyPreview(ctx: PoskliContext): Promise<boolean> {
   if (type === 'API' || type === 'EMPTY_PROJECT') return true
   const index = await workspaceProvider.readFile(ctx.projectId, 'index.html').catch(() => null)
   return Boolean(index)
+}
+
+/** Artefatos: arquivos realmente criados/editados nesta execução (auditoria real de ToolCalls). */
+async function auditArtifacts(ctx: PoskliContext): Promise<boolean | null> {
+  if (ctx.agentRunIds.length === 0) return null
+  try {
+    const calls = await db.toolCall.count({
+      where: {
+        runId: { in: ctx.agentRunIds },
+        tool: { in: FILE_WRITE_TOOLS },
+        status: 'OK',
+      },
+    })
+    return calls > 0
+  } catch {
+    return null
+  }
+}
+
+/** Deriva snapshots FINAIS das tarefas do grafo desta execução. */
+async function taskSnapshots(projectId: string): Promise<TaskSnapshot[]> {
+  const tasks = await db.task.findMany({
+    where: { projectId, status: { not: 'CANCELLED' } },
+    orderBy: { order: 'asc' },
+    select: { id: true, title: true, status: true, attempts: true, agentRole: true },
+  })
+  return tasks.map((t) => ({
+    id: t.id,
+    title: t.title,
+    status: t.status as TaskSnapshot['status'],
+    required: true,
+    attempts: t.attempts,
+    agentRole: t.agentRole,
+  }))
+}
+
+// ---------- CORREÇÕES (registros com estado individual — spec §15) ----------
+
+async function startCorrection(ctx: PoskliContext, trigger: CorrectionRecord['trigger']): Promise<CorrectionRecord> {
+  const record: CorrectionRecord = {
+    id: `cor_${crypto.randomUUID().slice(0, 12)}`,
+    attempt: ctx.corrections.length + 1,
+    trigger,
+    state: 'STARTED',
+    startedAt: new Date().toISOString(),
+  }
+  ctx.corrections = [...ctx.corrections, record]
+  await persistRecords(ctx)
+  await emitEvent({
+    type: 'correction.started',
+    projectId: ctx.projectId,
+    runId: ctx.runId,
+    status: 'RUNNING',
+    message: `Poskli — correção ${record.attempt} iniciada (${trigger === 'TEST_FAILURE' ? 'falha de testes' : 'revisão solicitou mudanças'})`,
+    data: { correctionId: record.id, attempt: record.attempt, trigger },
+  })
+  return record
+}
+
+async function finishCorrection(
+  ctx: PoskliContext,
+  record: CorrectionRecord,
+  state: CorrectionRecord['state'],
+  evidence: string,
+  errorCode?: PoskliErrorCode
+): Promise<void> {
+  const idx = ctx.corrections.findIndex((c) => c.id === record.id)
+  if (idx >= 0) {
+    ctx.corrections[idx] = {
+      ...ctx.corrections[idx],
+      state,
+      evidence: evidence.slice(0, 300),
+      errorCode,
+      finishedAt: new Date().toISOString(),
+    }
+    // nova referência do array — a UI lê do DB (persistRecords)
+  }
+  await persistRecords(ctx)
+  await emitEvent({
+    type: state === 'COMPLETED' ? 'correction.completed' : 'correction.failed',
+    projectId: ctx.projectId,
+    runId: ctx.runId,
+    status: state,
+    message:
+      state === 'COMPLETED'
+        ? `Poskli — correção ${record.attempt} aplicada`
+        : state === 'BLOCKED'
+          ? `Poskli — correção ${record.attempt} bloqueada (${errorCode ?? 'bloqueio'})`
+          : `Poskli — correção ${record.attempt} falhou`,
+    data: { correctionId: record.id, attempt: record.attempt, state },
+  })
+}
+
+/** Executa UMA correção real (Engenheiro + saída real dos testes/revisão). */
+async function applyCorrection(
+  ctx: PoskliContext,
+  record: CorrectionRecord,
+  buildContext: () => Promise<string>
+): Promise<void> {
+  const target = (await db.task.findFirst({ where: { projectId: ctx.projectId, status: 'COMPLETED' }, orderBy: { order: 'desc' } }))
+    ?? (await db.task.findFirst({ where: { projectId: ctx.projectId, status: { not: 'CANCELLED' } }, orderBy: { order: 'asc' } }))
+  if (!target) {
+    await finishCorrection(ctx, record, 'BLOCKED', 'nenhuma tarefa disponível para corrigir', 'WORKSPACE_FAILURE')
+    return
+  }
+  const fix = await implementTask(ctx, target, await buildContext())
+  if (fix.status === 'COMPLETED') {
+    await transitionTask(target.id, 'COMPLETED', { result: { output: fix.result.slice(0, 3000), correctedIn: record.attempt } as object, error: null })
+    await finishCorrection(ctx, record, 'COMPLETED', `correção aplicada: ${fix.result.slice(0, 140)}`)
+    ctx.evidence.push(`Correção ${record.attempt} aplicada (${record.trigger === 'TEST_FAILURE' ? 'falha de testes' : 'revisão'})`)
+  } else {
+    const classified = classifyError(fix.result)
+    await transitionTask(target.id, 'COMPLETED', { result: { output: fix.result.slice(0, 3000), correctedIn: record.attempt } as object })
+    await finishCorrection(ctx, record, classified.code === 'PROVIDER_RATE_LIMIT' ? 'BLOCKED' : 'FAILED', `tentativa falhou: ${fix.result.slice(0, 140)}`, classified.code)
+    if (classified.code === 'PROVIDER_RATE_LIMIT') ctx.errorCode = classified.code
+    ctx.evidence.push(`Correção ${record.attempt} não concluída (${classified.code})`)
+  }
 }
 
 // ---------- ORQUESTRADOR PRINCIPAL ----------
@@ -367,6 +662,10 @@ export async function runPoskli(runId: string): Promise<void> {
     maxIterations: run.maxIterations,
     evidence: [],
     plan: { architecture: '', stack: [], tasks: [] },
+    testRecords: [],
+    corrections: [],
+    review: { status: 'NOT_RUN', attempts: 0 },
+    agentRunIds: [],
   }
 
   try {
@@ -394,7 +693,7 @@ export async function runPoskli(runId: string): Promise<void> {
       return `Grafo pronto: ${totalTasks} tarefa(s)`
     })
 
-    // 3) IMPLEMENTING — Engenheiro executa as tarefas (com retry interno)
+    // 3) IMPLEMENTING — Engenheiro executa as tarefas (com retry interno limitado)
     if (!(await setState(ctx, 'IMPLEMENTING'))) return
     await stage(ctx, 'IMPLEMENTING', async () => {
       let guard = 0
@@ -416,6 +715,14 @@ export async function runPoskli(runId: string): Promise<void> {
           completed++
           ctx.evidence.push(`✔ ${fresh.title}: ${exec.result.slice(0, 140)}`)
         } else {
+          const classified = classifyError(exec.result)
+          if (classified.code === 'PROVIDER_RATE_LIMIT') {
+            // sem retry para rate limit (política) — tarefa FAILED com causa real
+            await transitionTask(fresh.id, 'FAILED', { error: `${classified.friendly} [${classified.code}]` })
+            ctx.errorCode = classified.code
+            ctx.evidence.push(`✘ ${fresh.title}: ${classified.code}`)
+            continue
+          }
           const fixed = await implementTask(ctx, {
             ...fresh,
             description: fresh.description + `\n\n[CORREÇÃO] Tentativa anterior falhou (${exec.status}). Resultado:\n${exec.result.slice(0, 900)}`,
@@ -423,7 +730,7 @@ export async function runPoskli(runId: string): Promise<void> {
           if (fixed.status === 'COMPLETED') {
             await transitionTask(fresh.id, 'COMPLETED', { result: { output: fixed.result.slice(0, 3000) } as object, error: null })
             completed++
-            ctx.evidence.push(`✔ (após correção) ${fresh.title}`)
+            ctx.evidence.push(`✔ (após retry) ${fresh.title}`)
           } else {
             await transitionTask(fresh.id, 'FAILED', { error: exec.result.slice(0, 900) })
             ctx.evidence.push(`✘ ${fresh.title}: ${exec.status}`)
@@ -433,23 +740,19 @@ export async function runPoskli(runId: string): Promise<void> {
       return `${completed}/${totalTasks} tarefas implementadas`
     })
 
-    // 4) TESTING — testes REAIS no Execution Engine
+    // 4) TESTING — testes REAIS no Execution Engine (registro com identidade)
     if (!(await setState(ctx, 'TESTING'))) return
-    let tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'primeira execução'))
+    let tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'INITIAL'))
     let testPassed = tests.passed
 
-    // 5) CORRECTING ← TESTING (loop limitado por maxIterations)
+    // 5) CORRECTING ← TESTING (loop limitado por maxIterations — registros reais)
     while (!testPassed && ctx.iteration < ctx.maxIterations && Date.now() < ctx.deadline - 15_000) {
       ctx.iteration++
       if (!(await setState(ctx, 'CORRECTING'))) return
-      const failureHints = extractFailureHints(tests.stdout, tests.stderr)
+      const record = await startCorrection(ctx, 'TEST_FAILURE')
       await stage(ctx, 'CORRECTING', async () => {
-        const target = (await db.task.findFirst({ where: { projectId: ctx.projectId, status: 'COMPLETED' }, orderBy: { order: 'desc' } }))
-          ?? (await db.task.findFirst({ where: { projectId: ctx.projectId }, orderBy: { order: 'asc' } }))
-        if (!target) return 'nenhuma tarefa para corrigir'
-        const fix = await implementTask(
-          ctx,
-          target,
+        const failureHints = extractFailureHints(tests.stdout, tests.stderr)
+        await applyCorrection(ctx, record, async () =>
           [
             '## FALHA REAL DOS TESTES (Execution Engine — saída do comando)',
             `Comando: ${tests.command}`,
@@ -459,131 +762,238 @@ export async function runPoskli(runId: string): Promise<void> {
             'Corrija o código para que os testes passem. LEIA os arquivos citados antes de editar.',
           ].join('\n')
         )
-        await transitionTask(target.id, 'COMPLETED', { result: { output: fix.result.slice(0, 3000), correctedIn: ctx.iteration } as object, error: null })
-        return `Correção #${ctx.iteration} aplicada: ${fix.status}`
+        const rec = ctx.corrections.find((c) => c.id === record.id)
+        return rec ? `Correção #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`
       })
-      ctx.evidence.push(`Correção #${ctx.iteration} (falha real: ${tests.stderr.split('\n').filter(Boolean).slice(0, 1).join(' ').slice(0, 100) || 'exit != 0'})`)
+      await db.poskliRun.update({ where: { id: runId }, data: { iteration: ctx.iteration } }).catch(() => {})
 
       if (!(await setState(ctx, 'TESTING'))) return
-      tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, `após correção ${ctx.iteration}`))
+      tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'AFTER_CORRECTION'))
       testPassed = tests.passed
     }
-    await db.poskliRun.update({ where: { id: runId }, data: { testsPassed: testPassed, iteration: ctx.iteration } })
 
-    // 6) REVIEWING — Revisor de Qualidade
+    // 6) REVIEWING — Revisor de Qualidade (classifica rate limit; nunca mascara)
     if (!(await setState(ctx, 'REVIEWING'))) return
-    const review = await stage(ctx, 'REVIEWING', () => reviewStage(ctx))
+    ctx.review = await stage(ctx, 'REVIEWING', () => reviewStage(ctx))
+    await db.poskliRun.update({ where: { id: runId }, data: { reviewResult: ctx.review as unknown as object } }).catch(() => {})
 
-    // Revisor pediu mudanças → última correção honesta (se houver orçamento)
-    if (review.verdict === 'CHANGES_REQUESTED' && Date.now() < ctx.deadline - 40_000 && ctx.iteration < ctx.maxIterations) {
+    // Revisor pediu mudanças → correção registrada (se houver orçamento)
+    if (
+      ctx.review.status === 'CHANGES_REQUESTED' &&
+      Date.now() < ctx.deadline - 40_000 &&
+      ctx.iteration < ctx.maxIterations
+    ) {
       ctx.iteration++
       if (await setState(ctx, 'CORRECTING')) {
+        const record = await startCorrection(ctx, 'REVIEW_CHANGES')
         await stage(ctx, 'CORRECTING', async () => {
-          const target = await db.task.findFirst({ where: { projectId: ctx.projectId, status: { in: ['COMPLETED', 'RUNNING', 'FAILED', 'PENDING'] } }, orderBy: { order: 'desc' } })
-          if (!target) return 'nada a corrigir'
-          const fix = await implementTask(
-            ctx,
-            target,
-            `## REVISÃO SOLICITOU MUDANÇAS\n${review.summary.slice(0, 700)}\n\nAplique as correções apontadas.`
+          await applyCorrection(ctx, record, async () =>
+            `## REVISÃO SOLICITOU MUDANÇAS\n${(ctx.review.summary ?? '').slice(0, 700)}\n\nAplique as correções apontadas.`
           )
-          // transição final SEMPRE (bugfix: tarefa não podia ficar RUNNING)
-          await transitionTask(
-            target.id,
-            fix.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED',
-            { result: { output: fix.result.slice(0, 3000), correctedIn: ctx.iteration } as object, error: fix.status === 'COMPLETED' ? null : fix.result.slice(0, 800) }
-          )
-          return `Correção pós-revisão: ${fix.status}`
+          const rec = ctx.corrections.find((c) => c.id === record.id)
+          return rec ? `Correção pós-revisão #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`
         })
         if (await setState(ctx, 'TESTING')) {
-          tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'pós-revisão'))
+          tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'POST_REVIEW'))
           testPassed = tests.passed
         }
       }
     }
 
-    // 7) VERIFYING — testes + preview de verdade
+    // 7) VERIFYING — checklist determinístico (preview + build + artefatos)
     if (!(await setState(ctx, 'VERIFYING'))) return
     let previewOk = false
+    let verification: VerificationResult | null = null
     await stage(ctx, 'VERIFYING', async () => {
       if (!testPassed && Date.now() < ctx.deadline - 20_000) {
-        tests = await runTestsStage(ctx, 'verificação final')
+        tests = await runTestsStage(ctx, 'FINAL')
         testPassed = tests.passed
       }
-      previewOk = await verifyPreview(ctx)
-      await db.poskliRun.update({ where: { id: runId }, data: { testsPassed: testPassed, previewOk } })
-      return `Testes: ${testPassed ? 'OK' : 'FALHARAM'} · Preview: ${previewOk ? 'OK' : 'sem entrypoint web'}`
+      const projectType = (await db.project.findUnique({ where: { id: ctx.projectId }, select: { type: true } }))?.type ?? 'EMPTY_PROJECT'
+      const previewRequired = projectType !== 'API' && projectType !== 'EMPTY_PROJECT'
+      previewOk = previewRequired ? await verifyPreview(ctx) : true
+      const buildCommand = await buildCommandFor(ctx.projectId)
+      let buildOk: boolean | null = null
+      if (buildCommand && Date.now() < ctx.deadline - 45_000) {
+        ctx.executions++
+        const buildRes = await runExecution({
+          projectId: ctx.projectId,
+          command: buildCommand,
+          userId: ctx.userId,
+          source: 'poskli',
+          trigger: 'verifier',
+          timeoutMs: Math.min(90_000, Math.max(10_000, ctx.deadline - Date.now() - 10_000)),
+        })
+        buildOk = buildRes.status === 'SUCCESS' && buildRes.exitCode === 0
+      }
+      const artifactsProduced = await auditArtifacts(ctx)
+      verification = {
+        ran: true,
+        checks: buildVerificationChecks({ previewRequired, previewOk: previewRequired ? previewOk : null, buildRequired: Boolean(buildCommand), buildOk, artifactsProduced }),
+      }
+      await db.poskliRun.update({
+        where: { id: runId },
+        data: { testsPassed: testPassed, previewOk, reviewResult: ctx.review as unknown as object },
+      })
+      const required = verification.checks.filter((c) => c.required)
+      return `Verificação: ${required.filter((c) => c.status === 'PASS').length}/${required.length} checagens obrigatórias OK`
     })
 
-    // 8) FINAL — estado honesto + relatório
-    const progress = await projectProgress(ctx.projectId)
-    const finalState: PoskliState = testPassed ? 'COMPLETED' : 'FAILED'
-    const resultMd = [
-      '## Resultado do Poskli',
-      '',
-      `**Pedido:** ${ctx.request.slice(0, 300)}`,
-      `**Estado:** ${testPassed ? 'CONCLUÍDO' : 'FALHOU'} — testes ${testPassed ? 'verdes' : 'vermelhos'}${previewOk ? ', preview pronto' : ''}`,
-      `**Tarefas:** ${progress.completed}/${progress.total} concluídas`,
-      `**Iterações de correção:** ${ctx.iteration}/${ctx.maxIterations}`,
-      `**Testes (última execução):** ${tests.passed ? 'PASS' : 'FAIL'} — \`${tests.command}\``,
-      `**Tokens:** ${ctx.tokens.in + ctx.tokens.out}`,
-      '',
-      '### Evidências',
-      ...ctx.evidence.slice(-10).map((e) => `- ${e}`),
-      testPassed ? '' : `\n### Causa da falha\n${extractFailureHints(tests.stdout, tests.stderr).slice(0, 1200)}`,
-    ].join('\n')
-
-    await db.poskliRun.update({
-      where: { id: runId },
-      data: {
-        state: finalState,
-        result: resultMd,
-        tokensIn: ctx.tokens.in,
-        tokensOut: ctx.tokens.out,
-        finishedAt: new Date(),
-      },
-    })
-    await db.project.update({
-      where: { id: ctx.projectId },
-      data: { status: finalState === 'COMPLETED' ? 'COMPLETED' : 'FAILED' },
-    }).catch(() => {})
-    await emitEvent({
-      type: finalState === 'COMPLETED' ? 'pipeline.completed' : 'pipeline.failed',
-      projectId: ctx.projectId,
-      runId,
-      status: finalState,
-      message: `Poskli ${finalState === 'COMPLETED' ? 'concluiu' : 'não conseguiu concluir'} o pedido — testes ${testPassed ? 'OK' : 'FALHARAM'}`,
-      durationMs: Date.now() - started,
-      data: { tokens: ctx.tokens.in + ctx.tokens.out, testsPassed: testPassed, previewOk },
-    })
-
-    // sync final + memória do projeto
-    await syncBackToDb(ctx.projectId).catch(() => {})
-    await updateProjectMemory(ctx.projectId, {
-      completedTaskSummaries: [{ taskId: runId, title: `Poskli: ${ctx.request.slice(0, 80)}`, summary: resultMd.slice(0, 400) }],
-    }).catch(() => {})
+    // 8) FINAL — deriveFinalStatus() é a FONTE DA VERDADE (nunca um boolean único)
+    const derivation = deriveFinalStatus({
+      cancelled: false,
+      interrupted: false,
+      tasks: await taskSnapshots(ctx.projectId),
+      tests: ctx.testRecords,
+      review: ctx.review,
+      corrections: ctx.corrections,
+      verification,
+      testsRequired: true,
+      reviewRequired: true,
+    } satisfies DeriveFinalStatusInput)
+    await persistFinalResult(ctx, derivation, started)
   } catch (e) {
-    const msg = (e as Error).message
+    // ---- ERRO: CLASSIFICAR → DERIVAR CONSERVADORAMENTE (nunca sucesso) ----
+    const classified = classifyError(e)
     const row = await db.poskliRun.findUnique({ where: { id: runId }, select: { state: true } }).catch(() => null)
     const cancelled = row?.state === 'CANCELLED'
-    await db.poskliRun.update({
-      where: { id: runId },
-      data: {
-        state: cancelled ? 'CANCELLED' : 'FAILED',
-        error: msg.slice(0, 800),
-        tokensIn: ctx.tokens.in,
-        tokensOut: ctx.tokens.out,
-        finishedAt: new Date(),
-      },
+    try {
+      const derivation = deriveFinalStatus({
+        cancelled,
+        interrupted: true, // fluxo não percorrido até o fim → nunca CONCLUÍDO
+        tasks: await taskSnapshots(ctx.projectId).catch(() => [] as TaskSnapshot[]),
+        tests: ctx.testRecords,
+        review: ctx.review,
+        corrections: ctx.corrections,
+        verification: null,
+        testsRequired: true,
+        reviewRequired: true,
+      } satisfies DeriveFinalStatusInput)
+      await persistFinalResult(ctx, derivation, started, classified)
+    } catch {
+      // derivação falhou (DB?) — fallback honesto: FAILED com erro real
+      await db.poskliRun.update({
+        where: { id: runId },
+        data: {
+          state: 'FAILED',
+          error: classified.detail.slice(0, 800),
+          errorCode: classified.code,
+          outcomeReason: 'ERRO_NA_EXECUÇÃO',
+          tokensIn: ctx.tokens.in,
+          tokensOut: ctx.tokens.out,
+          finishedAt: new Date(),
+        },
+      }).catch(() => {})
+    }
+  } finally {
+    // sync final + memória do projeto (best-effort)
+    await syncBackToDb(ctx.projectId).catch(() => {})
+    await updateProjectMemory(ctx.projectId, {
+      completedTaskSummaries: [{ taskId: runId, title: `Poskli: ${ctx.request.slice(0, 80)}`, summary: (await db.poskliRun.findUnique({ where: { id: runId }, select: { result: true } }))?.result?.slice(0, 400) ?? '' }],
     }).catch(() => {})
-    await db.project.update({ where: { id: ctx.projectId }, data: { status: 'FAILED' } }).catch(() => {})
-    await emitEvent({
-      type: 'pipeline.failed',
-      projectId: ctx.projectId,
-      runId,
-      message: 'Poskli não concluiu — abra a execução para ver a causa real',
-      data: { error: msg.slice(0, 300) },
-    })
   }
+}
+
+/** Persiste a derivação final — backend e UI consomem o MESMO objeto. */
+async function persistFinalResult(
+  ctx: PoskliContext,
+  derivation: DeriveFinalStatusResult,
+  started: number,
+  classifiedError?: ReturnType<typeof classifyError>
+): Promise<void> {
+  const terminal = displayFromGlobal(derivation.state)
+  const resultMd = deriveResultMarkdown(derivation, {
+    request: ctx.request,
+    tokens: ctx.tokens.in + ctx.tokens.out,
+    iterations: `${ctx.iteration}/${ctx.maxIterations}`,
+    evidence: ctx.evidence,
+  })
+  const lastTest = ctx.testRecords[ctx.testRecords.length - 1]
+
+  await db.poskliRun.update({
+    where: { id: ctx.runId },
+    data: {
+      state: terminal,
+      derived: derivation as unknown as object,
+      outcomeReason: derivation.reason,
+      errorCode: classifiedError?.code ?? ctx.errorCode ?? null,
+      result: resultMd,
+      testsPassed: lastTest ? lastTest.status === 'PASS' : false,
+      tokensIn: ctx.tokens.in,
+      tokensOut: ctx.tokens.out,
+      error: classifiedError ? classifiedError.detail.slice(0, 800) : derivation.state === 'SUCCESS' ? null : derivation.summary.slice(0, 800),
+      finishedAt: new Date(),
+    },
+  })
+
+  const projectStatus =
+    derivation.state === 'SUCCESS' ? 'COMPLETED'
+      : derivation.state === 'PARTIAL' ? 'PARTIAL'
+        : derivation.state === 'BLOCKED' ? 'BLOCKED'
+          : derivation.state === 'CANCELLED' ? 'CANCELLED'
+            : 'FAILED'
+  await db.project.update({ where: { id: ctx.projectId }, data: { status: projectStatus } }).catch(() => {})
+
+  await emitEvent({
+    type: derivation.state === 'SUCCESS' ? 'pipeline.completed' : 'pipeline.failed',
+    projectId: ctx.projectId,
+    runId: ctx.runId,
+    status: terminal,
+    message: `Poskli ${STATE_LABELS[terminal]} — ${derivation.summary.slice(0, 200)}`,
+    durationMs: Date.now() - started,
+    data: {
+      finalState: derivation.state,
+      reason: derivation.reason,
+      criteria: derivation.criteria.map((c) => ({ id: c.id, status: c.status })),
+      tasks: `${derivation.counters.tasks.completed}/${derivation.counters.tasks.total}`,
+      corrections: derivation.counters.corrections.applied,
+      tokens: ctx.tokens.in + ctx.tokens.out,
+    },
+  })
+}
+
+// ---------- RECUPERAÇÃO DE RUNS TRAVADOS (spec §12: interrompido ≠ concluído) ----------
+
+/** Run ativo sem atividade (stale/freeze) → derivação conservadora honesta. */
+export async function recoverStaleRun(runId: string): Promise<void> {
+  const run = await db.poskliRun.findUnique({ where: { id: runId } })
+  if (!run) return
+  if (!['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'CORRECTING', 'VERIFYING'].includes(run.state)) return
+
+  const classified = run.error ? classifyError(run.error) : undefined
+  const derivation = deriveFinalStatus({
+    cancelled: false,
+    interrupted: true,
+    tasks: await taskSnapshots(run.projectId).catch(() => [] as TaskSnapshot[]),
+    tests: (run.testRecords as unknown as TestRecordSnapshot[]) ?? [],
+    review: ((run.reviewResult as unknown as ReviewSnapshot) ?? { status: 'NOT_RUN', attempts: 0 }),
+    corrections: (run.corrections as unknown as CorrectionSnapshot[]) ?? [],
+    verification: null,
+    testsRequired: true,
+    reviewRequired: true,
+  } satisfies DeriveFinalStatusInput)
+
+  const terminal = displayFromGlobal(derivation.state)
+  await db.poskliRun.update({
+    where: { id: runId },
+    data: {
+      state: terminal,
+      derived: derivation as unknown as object,
+      outcomeReason: derivation.reason,
+      errorCode: classified?.code ?? 'BUDGET_TIMEOUT',
+      error: (run.error ?? 'Run anterior travou (inatividade) — recuperado automaticamente').slice(0, 800),
+      finishedAt: new Date(),
+    },
+  }).catch(() => {})
+  await db.project.update({ where: { id: run.projectId }, data: { status: derivation.state === 'SUCCESS' ? 'COMPLETED' : 'FAILED' } }).catch(() => {})
+  await emitEvent({
+    type: 'pipeline.failed',
+    projectId: run.projectId,
+    runId,
+    status: terminal,
+    message: `Poskli ${STATE_LABELS[terminal]} — execução interrompida recuperada com estado honesto`,
+    data: { finalState: derivation.state, reason: derivation.reason, recovered: true },
+  })
 }
 
 // ---------- BOOTSTRAP ----------

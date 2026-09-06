@@ -282,7 +282,8 @@ model PoskliRun {
   projectId     String
   userId        String
   request       String
-  state         String    @default("ANALYZING") // ANALYZING|PLANNING|IMPLEMENTING|TESTING|REVIEWING|CORRECTING|VERIFYING|COMPLETED|FAILED|CANCELLED
+  // Fases operacionais + terminal: COMPLETED|FAILED|BLOCKED|PARTIAL|CANCELLED
+  state         String    @default("ANALYZING") // ANALYZING|PLANNING|IMPLEMENTING|TESTING|REVIEWING|CORRECTING|VERIFYING|COMPLETED|FAILED|BLOCKED|PARTIAL|CANCELLED
   iteration     Int       @default(0)
   maxIterations Int       @default(3)
   stages        Json      // timeline: [{stage,state,startedAt,finishedAt,durationMs,summary,tokensIn,tokensOut}]
@@ -290,6 +291,19 @@ model PoskliRun {
   lastExecId    String?
   testsPassed   Boolean   @default(false)
   previewOk     Boolean   @default(false)
+  // ---- POSKLI 0.2 — máquina de estados determinística ----
+  // Fonte única de verdade do resultado: deriveFinalStatus() (state-machine.ts)
+  derived       Json?     // {state,reason,summary,criteria[],counters,conservative,derivedAt}
+  // Registros de teste com identidade (spec §11/§23): [{id,executionId,command,status,trigger,exitCode,ts}]
+  testRecords   Json?
+  // Correções com estado individual (spec §15): [{id,attempt,trigger,state,evidence,errorCode,ts}]
+  corrections   Json?
+  // Snapshot da revisão (spec §5): {status,verdict,issues,summary,blockedReason,attempts}
+  reviewResult  Json?
+  // Classificação do erro que afetou o resultado (taxonomia spec §31)
+  errorCode     String?
+  // Motivo de máquina do resultado (ex.: CRITÉRIO_TASKS_FALHOU)
+  outcomeReason String?
   tokensIn      Int       @default(0)
   tokensOut     Int       @default(0)
   error         String?
@@ -297,8 +311,10 @@ model PoskliRun {
   cancelToken   String    @default(cuid()) // flag de cancelamento cooperativo
   startedAt     DateTime  @default(now())
   finishedAt    DateTime?
+  updatedAt     DateTime  @default(now()) @updatedAt // detecção de run travado (stale recovery)
 
   @@index([projectId, startedAt])
+  @@index([projectId, state])
 }
 
 // ============================================================

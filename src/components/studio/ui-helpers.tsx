@@ -44,10 +44,11 @@ export function statusColor(s?: string): string {
 export const EVENT_ICONS: Record<string, any> = {
   'agent.started': Zap, 'agent.completed': CircleCheck, 'agent.failed': CircleAlert,
   'poskli.state': Loader,
-  'task.started': Play, 'task.completed': CircleCheckBig, 'task.failed': CircleX,
+  'task.started': Play, 'task.completed': CircleCheckBig, 'task.failed': CircleX, 'task.blocked': Ban,
   'tool.called': Wrench, 'tool.completed': Wrench, 'tool.denied': CircleSlash,
   'test.started': FlaskConical, 'test.passed': CircleDot, 'test.failed': CircleDotDashed,
-  'review.started': Search, 'review.approved': ThumbsUp, 'review.changes_requested': ClipboardList, 'review.failed': Search,
+  'review.started': Search, 'review.approved': ThumbsUp, 'review.changes_requested': ClipboardList, 'review.failed': Search, 'review.blocked': CircleAlert,
+  'correction.started': RotateCw, 'correction.completed': CircleCheck, 'correction.failed': CircleX,
   'pipeline.started': Rocket, 'pipeline.completed': Flag, 'pipeline.failed': OctagonAlert,
   'project.created': FolderTree, 'fix.created': RotateCw, 'repeated_failure.detected': LifeBuoy,
   'limits.reached': Ban, 'github.commit.created': Save, 'github.branch.created': GitBranch,

@@ -2,7 +2,7 @@ import { NextResponse, after } from 'next/server'
 import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitApi, clientIp } from '@/lib/studio/security/rate-limit'
-import { startPoskli, runPoskli } from '@/lib/studio/poskli/orchestrator'
+import { startPoskli, runPoskli, recoverStaleRun } from '@/lib/studio/poskli/orchestrator'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -38,8 +38,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     where: { projectId: run.projectId, state: { in: activeStates } },
     orderBy: { startedAt: 'desc' },
   })
-  if (active && Date.now() - new Date(active.startedAt).getTime() < 10 * 60 * 1000) {
-    return NextResponse.json({ error: 'POSKLI_JÁ_ATIVO', runId: active.id }, { status: 409 })
+  if (active) {
+    const lastActivity = Math.max(
+      new Date(active.startedAt).getTime(),
+      new Date(active.updatedAt).getTime()
+    )
+    if (Date.now() - lastActivity < 10 * 60 * 1000) {
+      return NextResponse.json({ error: 'POSKLI_JÁ_ATIVO', runId: active.id }, { status: 409 })
+    }
+    await recoverStaleRun(active.id).catch(() => {})
   }
 
   const { runId } = await startPoskli({ projectId: run.projectId, userId: user.id, request, maxIterations: 2 })

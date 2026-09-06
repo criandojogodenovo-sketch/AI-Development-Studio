@@ -130,11 +130,20 @@ export async function projectProgress(projectId: string) {
 }
 
 export async function transitionTask(taskId: string, status: TaskStatus, extra?: Record<string, unknown>) {
-  await db.task.update({ where: { id: taskId }, data: { status, ...extra } })
+  // update retorna a row ATUALIZADA — attempts reais vão no evento (identidade,
+  // spec §25: evento com taskId/status/attempt; sem duplicar estado inventado)
+  const row = await db.task.update({ where: { id: taskId }, data: { status, ...extra } })
+  const type =
+    status === 'COMPLETED' ? 'task.completed'
+      : status === 'FAILED' ? 'task.failed'
+        : status === 'BLOCKED' ? 'task.blocked'
+          : 'task.started'
   await emitEvent({
-    type: status === 'COMPLETED' ? 'task.completed' : status === 'FAILED' ? 'task.failed' : 'task.started',
+    type,
     taskId,
     status,
     message: `Tarefa ${taskId.slice(-6)} → ${status}`,
+    data: { attempts: row.attempts, maxAttempts: row.maxAttempts, title: row.title },
   })
+  return row
 }
