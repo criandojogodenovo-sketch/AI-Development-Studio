@@ -961,12 +961,13 @@ export async function recoverStaleRun(runId: string): Promise<void> {
   if (!['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'CORRECTING', 'VERIFYING'].includes(run.state)) return
 
   const classified = run.error ? classifyError(run.error) : undefined
+  const reviewSnapshot: ReviewSnapshot = (run.reviewResult as unknown as ReviewSnapshot) ?? { status: 'NOT_RUN', attempts: 0 }
   const derivation = deriveFinalStatus({
     cancelled: false,
     interrupted: true,
     tasks: await taskSnapshots(run.projectId).catch(() => [] as TaskSnapshot[]),
     tests: (run.testRecords as unknown as TestRecordSnapshot[]) ?? [],
-    review: ((run.reviewResult as unknown as ReviewSnapshot) ?? { status: 'NOT_RUN', attempts: 0 }),
+    review: reviewSnapshot,
     corrections: (run.corrections as unknown as CorrectionSnapshot[]) ?? [],
     verification: null,
     testsRequired: true,
@@ -974,6 +975,14 @@ export async function recoverStaleRun(runId: string): Promise<void> {
   } satisfies DeriveFinalStatusInput)
 
   const terminal = displayFromGlobal(derivation.state)
+  const resultMd = deriveResultMarkdown(derivation, {
+    request: run.request,
+    tokens: run.tokensIn + run.tokensOut,
+    iterations: `${run.iteration}/${run.maxIterations}`,
+    evidence: ['Execução interrompida (run travado recuperado automaticamente)'],
+  })
+  const lastTest = ((run.testRecords as unknown as TestRecordSnapshot[]) ?? []).slice(-1)[0]
+
   await db.poskliRun.update({
     where: { id: runId },
     data: {
@@ -982,10 +991,20 @@ export async function recoverStaleRun(runId: string): Promise<void> {
       outcomeReason: derivation.reason,
       errorCode: classified?.code ?? 'BUDGET_TIMEOUT',
       error: (run.error ?? 'Run anterior travou (inatividade) — recuperado automaticamente').slice(0, 800),
+      // relatório e snapshot efetivo: UI mostra a MESMA verdade da derivação
+      result: resultMd,
+      reviewResult: (run.reviewResult as unknown as object) ?? (reviewSnapshot as unknown as object),
+      testsPassed: lastTest ? lastTest.status === 'PASS' : false,
       finishedAt: new Date(),
     },
   }).catch(() => {})
-  await db.project.update({ where: { id: run.projectId }, data: { status: derivation.state === 'SUCCESS' ? 'COMPLETED' : 'FAILED' } }).catch(() => {})
+  const projectStatus =
+    derivation.state === 'SUCCESS' ? 'COMPLETED'
+      : derivation.state === 'PARTIAL' ? 'PARTIAL'
+        : derivation.state === 'BLOCKED' ? 'BLOCKED'
+          : derivation.state === 'CANCELLED' ? 'CANCELLED'
+            : 'FAILED'
+  await db.project.update({ where: { id: run.projectId }, data: { status: projectStatus } }).catch(() => {})
   await emitEvent({
     type: 'pipeline.failed',
     projectId: run.projectId,
