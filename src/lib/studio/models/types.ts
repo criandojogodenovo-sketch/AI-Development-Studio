@@ -27,6 +27,13 @@ export interface CompletionRequest {
   messages: ChatMessage[]
   temperature?: number
   maxTokens?: number
+  /**
+   * Modelo FÍSICO alternativo do MESMO provider para retry interno
+   * (usado nas versões expposkli-*: fallback Experiential→Experiential).
+   * POLÍTICA: 429/rate limit NUNCA dispara este retry. Providers que
+   * não suportam fallback simplesmente ignoram o campo.
+   */
+  modelFallback?: string
 }
 
 export interface CompletionResult {

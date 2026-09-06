@@ -2,7 +2,7 @@
 // PROVIDER CHAIN — TESTES UNITÁRIOS (node:test + type stripping)
 // Executar: node --test tests/providers-chain.test.ts
 // Valida as REGRAS do roteamento por versão do Poskli:
-//   C1.  Chains por versão (0.1/0.2/0.3.1/1.0-flash)
+//   C1.  Chains por versão (0.1/0.2/0.3.1/1.0-flash/expposkli-*)
 //   C2.  Providers não configurados ficam FORA do chain
 //   C3.  Sem BAI → SDK sandbox (zai) substitui
 //   C4.  EXPLABS no 0.3.1 somente para tarefas difíceis
@@ -12,6 +12,8 @@
 //   C8.  BAI ALL_KEYS_FAILED (2 chaves exauridas) avança
 //   C9.  Chain vazio → erro controlado; chain exaurido → tentativas
 //   C10. Modelo físico correto por provider
+//   C11. expposkli-*: EXCLUSIVO Experiential (nunca NVIDIA/B.AI) +
+//         modelFallback repassado ao provider (retry interno)
 // ============================================================
 
 import test from 'node:test'
@@ -22,6 +24,8 @@ import {
   executeWithChain,
   errorClassOf,
   eligibleForChainFailover,
+  isExpposkliVersion,
+  POSKLI_VERSIONS,
   DEFAULT_POSKLI_VERSION,
   type ChainContext,
   type ChainEntry,
@@ -87,6 +91,14 @@ test('C1.4 — versão 1.0-flash: NVIDIA → EXPLABS → BAI (reserva)', () => {
   assert.deepEqual(resolveChain('1.0-flash', ALL), ['nvidia', 'explabs', 'bai'])
 })
 
+test('C1.5 — expposkli-1.0: EXPLABS EXCLUSIVO (nada mais entra, nem com tudo configurado)', () => {
+  assert.deepEqual(resolveChain('expposkli-1.0', ALL), ['explabs'])
+})
+
+test('C1.6 — expposkli-1.1: EXPLABS EXCLUSIVO (idem)', () => {
+  assert.deepEqual(resolveChain('expposkli-1.1', ALL), ['explabs'])
+})
+
 // ---------- C2: providers ausentes ficam fora ----------
 
 test('C2.1 — 0.2 sem chave NVIDIA: apenas BAI', () => {
@@ -95,6 +107,14 @@ test('C2.1 — 0.2 sem chave NVIDIA: apenas BAI', () => {
 
 test('C2.2 — 1.0-flash sem NVIDIA e sem EXPLABS: apenas BAI', () => {
   assert.deepEqual(resolveChain('1.0-flash', ctx({ nvidiaConfigured: false, explabsConfigured: false })), ['bai'])
+})
+
+test('C2.3 — expposkli-1.0 sem chave EXPLABS: chain VAZIO (erro honesto, SEM substituto)', () => {
+  assert.deepEqual(resolveChain('expposkli-1.0', ctx({ explabsConfigured: false })), [])
+})
+
+test('C2.4 — expposkli-1.1 sem chave EXPLABS: chain VAZIO (idem — nunca cai para BAI/NVIDIA)', () => {
+  assert.deepEqual(resolveChain('expposkli-1.1', ctx({ explabsConfigured: false })), [])
 })
 
 // ---------- C3: sandbox zai substitui BAI ----------
@@ -133,6 +153,17 @@ test('C4.4 — normalizeVersion: inválido/ausente → default 0.2', () => {
   assert.equal(normalizeVersion(''), DEFAULT_POSKLI_VERSION)
   assert.equal(normalizeVersion('1.0-flash'), '1.0-flash')
   assert.equal(normalizeVersion(' 0.3.1 '), '0.3.1')
+})
+
+test('C4.5 — normalizeVersion: expposkli-1.0/1.1 válidos; POSKLI_VERSIONS inclui as 6 versões', () => {
+  assert.equal(normalizeVersion('expposkli-1.0'), 'expposkli-1.0')
+  assert.equal(normalizeVersion(' expposkli-1.1 '), 'expposkli-1.1')
+  assert.equal(normalizeVersion('expposkli-2.0'), DEFAULT_POSKLI_VERSION)
+  assert.deepEqual(POSKLI_VERSIONS, ['0.1', '0.2', '0.3.1', '1.0-flash', 'expposkli-1.0', 'expposkli-1.1'])
+  assert.equal(isExpposkliVersion('expposkli-1.0'), true)
+  assert.equal(isExpposkliVersion('expposkli-1.1'), true)
+  assert.equal(isExpposkliVersion('0.2'), false)
+  assert.equal(isExpposkliVersion('1.0-flash'), false)
 })
 
 // ---------- C5: 429 NUNCA faz failover ----------
@@ -300,4 +331,87 @@ test('C10.2 — opts (temperature/maxTokens) repassados ao provider', async () =
   assert.equal(seenTemp, 0.3)
   assert.equal(seenMax, 128)
   assert.equal(seenModel, 'x')
+})
+
+// ---------- C11: expposkli-* exclusividade + modelFallback ----------
+
+test('C11.1 — entry com modelFallback: provider recebe model E modelFallback', async () => {
+  let seenModel: string | undefined
+  let seenFallback: string | undefined
+  const p: LLMProvider = {
+    name: 'explabs',
+    isAvailable: async () => true,
+    complete: async (req) => {
+      seenModel = req.model
+      seenFallback = req.modelFallback
+      return fakeResult(req.model)
+    },
+  }
+  await executeWithChain(
+    [{ provider: 'explabs', llm: p, model: 'gpt-6-astra', modelFallback: 'aion-2.0' }],
+    { messages: [] }
+  )
+  assert.equal(seenModel, 'gpt-6-astra')
+  assert.equal(seenFallback, 'aion-2.0')
+})
+
+test('C11.2 — entry SEM modelFallback: req.modelFallback fica undefined (não vaza p/ outros providers)', async () => {
+  let seenFallback: string | undefined = 'sentinela'
+  const p: LLMProvider = {
+    name: 'bai',
+    isAvailable: async () => true,
+    complete: async (req) => {
+      seenFallback = req.modelFallback
+      return fakeResult(req.model)
+    },
+  }
+  await executeWithChain([{ provider: 'bai', llm: p, model: 'glm-5.3-flash' }], { messages: [] })
+  assert.equal(seenFallback, undefined)
+})
+
+test('C11.3 — modelFallback igual ao model: NÃO é repassado (evita retry inútil)', async () => {
+  let seenFallback: string | undefined = 'sentinela'
+  const p: LLMProvider = {
+    name: 'explabs',
+    isAvailable: async () => true,
+    complete: async (req) => {
+      seenFallback = req.modelFallback
+      return fakeResult(req.model)
+    },
+  }
+  await executeWithChain(
+    [{ provider: 'explabs', llm: p, model: 'aion-2.0', modelFallback: 'aion-2.0' }],
+    { messages: [] }
+  )
+  assert.equal(seenFallback, undefined)
+})
+
+test('C11.4 — chain expposkli único provider: falha elegível exaure o chain SEM tocar outros providers', async () => {
+  const explabs = makeProvider('explabs', [err('SERVER_ERROR')])
+  const nvidia = makeProvider('nvidia', ['ok'])
+  await assert.rejects(
+    executeWithChain(
+      // simula o resultado de resolveChain('expposkli-1.0', ALL): SÓ explabs
+      [{ provider: 'explabs', llm: explabs, model: 'gpt-6-astra', modelFallback: 'aion-2.0' }],
+      { messages: [] }
+    ),
+    (e: Error & { code?: string; attempts?: unknown[] }) => {
+      assert.equal(e.code, 'ALL_PROVIDERS_FAILED')
+      assert.equal((e.attempts ?? []).length, 1)
+      return true
+    }
+  )
+  assert.equal(nvidia.calls.length, 0, 'exclusividade: NUNCA failover para fora da Experiential')
+})
+
+test('C11.5 — chain expposkli com 429: propaga IMEDIATAMENTE (política inviolável mantida)', async () => {
+  const explabs = makeProvider('explabs', [err('RATE_LIMIT')])
+  await assert.rejects(
+    executeWithChain(
+      [{ provider: 'explabs', llm: explabs, model: 'claude-fable-5.1', modelFallback: 'aion-2.0' }],
+      { messages: [] }
+    ),
+    (e: Error & { errorClass?: string }) => e.errorClass === 'RATE_LIMIT'
+  )
+  assert.equal(explabs.calls.length, 1)
 })

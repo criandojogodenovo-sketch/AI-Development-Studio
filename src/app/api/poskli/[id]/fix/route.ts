@@ -3,14 +3,17 @@ import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitApi, clientIp } from '@/lib/studio/security/rate-limit'
 import { startPoskli, runPoskli, recoverStaleRun } from '@/lib/studio/poskli/orchestrator'
+import { POSKLI_VERSIONS } from '@/lib/studio/models/chain'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
 /**
- * POST /api/poskli/:id/fix { message } — "Pedir correção ao Poskli":
- * cria um NOVO run focado em corrigir (usa o contexto do run origem
- * + mensagem de erro, ex: preview error).
+ * POST /api/poskli/:id/fix { message, poskliVersion? } — "Pedir
+ * correção ao Poskli": cria um NOVO run focado em corrigir (usa o
+ * contexto do run origem + mensagem de erro, ex: preview error).
+ * poskliVersion: seletor de modelos da UI (body ou header
+ * x-poskli-version); ausente → env POSKLI_VERSION.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getSessionUser(req)
@@ -22,6 +25,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params
   const body = await req.json().catch(() => ({}))
   const message = String(body.message ?? '').trim()
+  const rawVersion =
+    body.poskliVersion !== undefined && body.poskliVersion !== null
+      ? String(body.poskliVersion).trim()
+      : (req.headers.get('x-poskli-version') ?? '').trim()
+  if (rawVersion && !(POSKLI_VERSIONS as readonly string[]).includes(rawVersion)) {
+    return NextResponse.json(
+      { error: `VERSAO_POSKLI_INVALIDA: "${rawVersion.slice(0, 24)}" — válidas: ${POSKLI_VERSIONS.join(', ')}` },
+      { status: 400 }
+    )
+  }
+  const poskliVersion = rawVersion || undefined
 
   const run = await db.poskliRun.findUnique({ where: { id } })
   if (!run) return NextResponse.json({ error: 'RUN_NÃO_ENCONTRADO' }, { status: 404 })
@@ -49,10 +63,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     await recoverStaleRun(active.id).catch(() => {})
   }
 
-  const { runId } = await startPoskli({ projectId: run.projectId, userId: user.id, request, maxIterations: 2 })
+  const { runId } = await startPoskli({ projectId: run.projectId, userId: user.id, request, maxIterations: 2, poskliVersion })
 
   after(async () => {
-    await runPoskli(runId)
+    await runPoskli(runId, poskliVersion)
   })
 
   return NextResponse.json({ ok: true, runId, message: 'Correção Poskli iniciada' }, { status: 202 })

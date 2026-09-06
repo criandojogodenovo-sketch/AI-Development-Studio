@@ -3,14 +3,21 @@ import { db } from '@/lib/db'
 import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitAgentRun, rateLimitApi, clientIp } from '@/lib/studio/security/rate-limit'
 import { startPoskli, runPoskli, recoverStaleRun } from '@/lib/studio/poskli/orchestrator'
+import { POSKLI_VERSIONS, normalizeVersion } from '@/lib/studio/models/chain'
+import { STUDIO_CONFIG } from '@/lib/studio/config'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
 /**
- * POST /api/poskli/run { project, request } — inicia o ORQUESTRADOR
- * POSKLI (resposta imediata 202; execução via after() — sobrevive ao
- * serverless dentro do maxDuration). Estados visíveis + testes reais.
+ * POST /api/poskli/run { project, request, poskliVersion? } — inicia o
+ * ORQUESTRADOR POSKLI (resposta imediata 202; execução via after() —
+ * sobrevive ao serverless dentro do maxDuration). Estados visíveis +
+ * testes reais.
+ *
+ * poskliVersion: versão escolhida no SELETOR DE MODELOS da UI — também
+ * aceita via header x-poskli-version. Ausente/inválido → env POSKLI_VERSION
+ * (fallback padrão). Valor EXPLÍCITO inválido → 400 honesto (sem silêncio).
  */
 export async function POST(req: Request) {
   const user = await getSessionUser(req)
@@ -25,6 +32,17 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
   const projectId = String(body.project ?? '')
   const request = String(body.request ?? '').trim()
+  const rawVersion =
+    body.poskliVersion !== undefined && body.poskliVersion !== null
+      ? String(body.poskliVersion).trim()
+      : (req.headers.get('x-poskli-version') ?? '').trim()
+  if (rawVersion && !(POSKLI_VERSIONS as readonly string[]).includes(rawVersion)) {
+    return NextResponse.json(
+      { error: `VERSAO_POSKLI_INVALIDA: "${rawVersion.slice(0, 24)}" — válidas: ${POSKLI_VERSIONS.join(', ')}` },
+      { status: 400 }
+    )
+  }
+  const poskliVersion = rawVersion || undefined
 
   if (request.length < 5) {
     return NextResponse.json({ error: 'PEDIDO_INVÁLIDO (descreva o que deseja, mín 5 caracteres)' }, { status: 400 })
@@ -54,16 +72,23 @@ export async function POST(req: Request) {
     await recoverStaleRun(active.id).catch(() => {})
   }
 
-  const { runId } = await startPoskli({ projectId, userId: user.id, request, maxIterations: Number(body.maxIterations) || 3 })
+  const { runId } = await startPoskli({
+    projectId,
+    userId: user.id,
+    request,
+    maxIterations: Number(body.maxIterations) || 3,
+    poskliVersion,
+  })
 
   after(async () => {
-    await runPoskli(runId)
+    await runPoskli(runId, poskliVersion)
   })
 
   return NextResponse.json({ ok: true, runId, message: 'Poskli iniciado — acompanhe os estágios no painel' }, { status: 202 })
 }
 
-/** GET /api/poskli/run?project= — sessões Poskli do projeto. */
+/** GET /api/poskli/run?project= — sessões Poskli do projeto +
+ *  catálogo de versões do seletor de modelos (versões válidas + default). */
 export async function GET(req: Request) {
   const user = await getSessionUser(req)
   if (!user) return NextResponse.json({ error: 'NÃO_AUTENTICADO' }, { status: 401 })
@@ -84,5 +109,11 @@ export async function GET(req: Request) {
       startedAt: true, finishedAt: true, updatedAt: true, error: true,
     },
   })
-  return NextResponse.json({ runs })
+  return NextResponse.json({
+    runs,
+    poskliVersions: {
+      versions: POSKLI_VERSIONS,
+      default: normalizeVersion(STUDIO_CONFIG.router.poskliVersion),
+    },
+  })
 }

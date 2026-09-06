@@ -8,12 +8,19 @@
 //      Somente se: explicitamente habilitado + problema difícil +
 //      modelos gratuitos falharam + limites diários permitirem.
 //
-// PROVIDERS FÍSICOS — chain por versão do Poskli (POSKLI_VERSION):
-//   0.1       : B.AI
-//   0.2       : B.AI → NVIDIA
-//   0.3.1     : B.AI → NVIDIA → EXPLABS (somente tarefas difíceis)
-//   1.0-flash : NVIDIA → EXPLABS → B.AI (reserva)
+// PROVIDERS FÍSICOS — chain por versão do Poskli (POSKLI_VERSION
+// ou parâmetro poskliVersion da requisição — seletor de modelos da UI):
+//   0.1          : B.AI
+//   0.2          : B.AI → NVIDIA
+//   0.3.1        : B.AI → NVIDIA → EXPLABS (somente tarefas difíceis)
+//   1.0-flash    : NVIDIA → EXPLABS → B.AI (reserva)
+//   expposkli-1.0: EXPLABS EXCLUSIVO (master gpt-6-astra→aion-2.0,
+//                  coding claude-fable-5.1, review aion-2.0)
+//   expposkli-1.1: EXPLABS EXCLUSIVO (master claude-fable-5.1,
+//                  coding aion-2.0, review aion-2.0)
 // Sem chaves B.AI (sandbox): SDK local (zai) substitui o B.AI.
+// Versões expposkli-*: fallback APENAS dentro da Experiential —
+// NUNCA NVIDIA/B.AI (exclusividade por construção do chain).
 //
 // POLÍTICA INVARIÁVEL: 429/rate limit NUNCA faz failover (nem entre
 // chaves B.AI, nem entre providers). Falhas elegíveis (rede/5xx/
@@ -29,6 +36,7 @@ import { NVIDIAProvider, NVIDIA_MODEL_CATALOG } from './providers/nvidia.ts'
 import { ExperientialProvider, EXPLABS_MODEL_CATALOG } from './providers/experiential.ts'
 import {
   executeWithChain,
+  isExpposkliVersion,
   normalizeVersion,
   resolveChain,
   type ChainContext,
@@ -37,6 +45,7 @@ import {
   type PoskliVersion,
   type ProviderName,
 } from './chain'
+import { requestPoskliVersion } from './version-context.ts'
 import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, ModelRole } from './types'
 
 // ---------- REGISTRO DE MODELOS LÓGICOS ----------
@@ -108,6 +117,32 @@ function buildRegistry(): ModelDefinition[] {
 
 export const MODEL_REGISTRY: ModelDefinition[] = buildRegistry()
 
+// ---------- VERSÕES EXCLUSIVAS EXPLABS (expposkli-1.0 / 1.1) ----------
+// Modelos FÍSICOS por papel nestas versões (spec do produto) — ids
+// validados ao vivo em 2026-09-06. O modelFallback é o retry interno
+// Experiential→Experiential (bloqueio regional/falha elegível); 429
+// NUNCA dispara retry. Falha do par → erro honesto propagado.
+
+export interface ExpposkliRoleModels {
+  model: string
+  fallback: string
+}
+
+const EXPLABS_EXCLUSIVE_MODELS: Record<'expposkli-1.0' | 'expposkli-1.1', Record<'master' | 'coding' | 'review', ExpposkliRoleModels>> = {
+  'expposkli-1.0': {
+    // master: gpt-6-astra (se bloqueado por região → aion-2.0)
+    master: { model: EXPLABS_MODEL_CATALOG.master, fallback: 'aion-2.0' },
+    coding: { model: 'claude-fable-5.1', fallback: 'aion-2.0' },
+    review: { model: 'aion-2.0', fallback: 'claude-fable-5.1' },
+  },
+  'expposkli-1.1': {
+    // master: claude-fable-5.1 (gpt-6-astra como alternativa)
+    master: { model: 'claude-fable-5.1', fallback: EXPLABS_MODEL_CATALOG.master },
+    coding: { model: 'aion-2.0', fallback: 'claude-fable-5.1' },
+    review: { model: 'aion-2.0', fallback: 'claude-fable-5.1' },
+  },
+}
+
 export class ModelRouter {
   private providers: Record<string, LLMProvider>
 
@@ -133,8 +168,9 @@ export class ModelRouter {
 
   // ---------- CHAIN (providers físicos por versão do Poskli) ----------
 
+  /** Versão ativa: parâmetro DA REQUISIÇÃO (seletor da UI — ALS) > env. */
   private activeVersion(): PoskliVersion {
-    return normalizeVersion(STUDIO_CONFIG.router.poskliVersion)
+    return requestPoskliVersion() ?? normalizeVersion(STUDIO_CONFIG.router.poskliVersion)
   }
 
   private chainContext(difficulty?: Difficulty): ChainContext {
@@ -146,19 +182,30 @@ export class ModelRouter {
     }
   }
 
-  /** Entradas do chain (provider + modelo físico) para um modelo lógico. */
+  /** Entradas do chain (provider + modelo físico) para um modelo lógico.
+   *  Versões expposkli-*: modelo físico e fallback VÊM DA VERSÃO —
+   *  não do catálogo global (override por papel). */
   private entriesFor(
     def: ModelDefinition,
     difficulty?: Difficulty
   ): { entries: ChainEntry[]; version: PoskliVersion; chain: ProviderName[] } {
     const version = this.activeVersion()
     const chain = resolveChain(version, this.chainContext(difficulty))
+    const exclusive = isExpposkliVersion(version) ? EXPLABS_EXCLUSIVE_MODELS[version] : undefined
     const entries: ChainEntry[] = []
     for (const name of chain) {
       const llm = this.providers[name]
-      const model = def.physical[name]
+      let model = def.physical[name]
+      let modelFallback: string | undefined
+      if (exclusive && name === 'explabs') {
+        const override = exclusive[def.role as 'master' | 'coding' | 'review']
+        if (override) {
+          model = override.model
+          modelFallback = override.fallback
+        }
+      }
       if (!llm || !model) continue
-      entries.push({ provider: name, llm, model })
+      entries.push(modelFallback ? { provider: name, llm, model, modelFallback } : { provider: name, llm, model })
     }
     return { entries, version, chain }
   }
@@ -344,7 +391,8 @@ export class ModelRouter {
     }
   }
 
-  /** Snapshot para a UI (Models/Usage) — sem secrets. */
+  /** Snapshot para a UI (Models/Usage) — sem secrets.
+   *  A versão exibida é a do contexto ALS (seletor da UI) ou a env. */
   async overview() {
     const usage = await db.modelUsage.findMany({ orderBy: { day: 'desc' }, take: 60 })
     const version = this.activeVersion()

@@ -231,19 +231,27 @@ export function validateEnvironment(nodeEnv?: string): EnvValidationResult {
 
   // ---------- 10b. CHAIN DE PROVIDERS (POSKLI_VERSION + NVIDIA + EXPLABS) ----------
   // Consumidor: chain.ts / ModelRouter (roteamento por versão do Poskli)
+  // Whitelist espelha POSKLI_VERSIONS de chain.ts (o seletor de modelos
+  // da UI valida contra a MESMA lista em runtime).
+  const POSKLI_VERSION_WHITELIST = ['0.1', '0.2', '0.3.1', '1.0-flash', 'expposkli-1.0', 'expposkli-1.1']
   const chainVersion = (process.env.POSKLI_VERSION ?? '').trim()
-  if (chainVersion && !['0.1', '0.2', '0.3.1', '1.0-flash'].includes(chainVersion)) {
+  if (chainVersion && !POSKLI_VERSION_WHITELIST.includes(chainVersion)) {
     errors.push(issue('error', 'POSKLI_VERSION', 'chain.ts / ModelRouter (roteamento de providers)',
-      `valor "${chainVersion.slice(0, 12)}" inválido — esperado 0.1 | 0.2 | 0.3.1 | 1.0-flash (default 0.2).`))
+      `valor "${chainVersion.slice(0, 12)}" inválido — esperado ${POSKLI_VERSION_WHITELIST.join(' | ')} (default 0.2).`))
   }
   const nvKey = (process.env.NVIDIA_API_KEY ?? '').trim()
   const xlKey = (process.env.EXPLABS_API_KEY ?? '').trim()
   const activeVer = chainVersion || '0.2'
-  if (!nvKey && ['0.2', '0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
+  const isExpposkli = activeVer.startsWith('expposkli-')
+  if (!nvKey && !isExpposkli && ['0.2', '0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
     warnings.push(issue('warn', 'NVIDIA_API_KEY', 'NVIDIAProvider (chain do ModelRouter)',
       `ausente em produção com POSKLI_VERSION=${activeVer} — o chain seguirá sem o provider NVIDIA (failover adicional indisponível).`))
   }
-  if (!xlKey && ['0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
+  if (!xlKey && isExpposkli && isProd) {
+    warnings.push(issue('error', 'EXPLABS_API_KEY', 'ExperientialProvider (chain do ModelRouter)',
+      `ausente em produção com POSKLI_VERSION=${activeVer} — versão EXCLUSIVA Experiential: nenhum outro provider será usado e o chain fica VAZIO (runs falharão com erro honesto).`))
+  }
+  if (!xlKey && !isExpposkli && ['0.3.1', '1.0-flash'].includes(activeVer) && isProd) {
     warnings.push(issue('warn', 'EXPLABS_API_KEY', 'ExperientialProvider (chain do ModelRouter)',
       `ausente em produção com POSKLI_VERSION=${activeVer} — o chain seguirá sem o provider Experiential.`))
   }

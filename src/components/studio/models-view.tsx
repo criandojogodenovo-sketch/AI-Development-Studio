@@ -5,7 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useStudio } from '@/hooks/use-studio'
 import { formatTokens, modelRoleLabel } from './ui-helpers'
-import { Brain, ShieldAlert, BarChart3, ChevronRight } from 'lucide-react'
+import { readStoredPoskliVersion, poskliVersionOption } from '@/lib/poskli-version'
+import { Brain, ShieldAlert, BarChart3, ChevronRight, Cpu } from 'lucide-react'
 
 interface ModelInfo {
   id: string; label: string; role: string; description: string
@@ -63,17 +64,45 @@ export function ModelsView() {
   const { api } = useStudio()
   const [data, setData] = useState<any>(null)
 
+  // reflete o SELETOR DE MODELOS (localStorage) — o snapshot do chain
+  // (disponibilidade/providers) é calculado para a versão selecionada
   useEffect(() => {
-    api<any>('/api/models').then(setData).catch(() => {})
+    const v = readStoredPoskliVersion()
+    const q = v ? `?version=${encodeURIComponent(v)}` : ''
+    api<any>(`/api/models${q}`).then(setData).catch(() => {})
   }, [api])
 
   if (!data) return <p className="text-sm text-zinc-500">carregando…</p>
 
   const totals = data.totalsToday ?? { requests: 0, totalTokens: 0, errors: 0 }
+  const chainVersion: string | undefined = data.chain?.version
+  const chainProviders: string[] = data.chain?.providers ?? []
+  const exclusive = poskliVersionOption(chainVersion ?? '')?.explabsExclusive ?? false
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-bold">Motor de IA & Uso</h2>
+      <div className="flex items-center gap-2 flex-wrap">
+        <h2 className="text-lg font-bold">Motor de IA & Uso</h2>
+        {chainVersion && (
+          <Badge
+            variant="outline"
+            title={`Cadeia de providers: ${chainProviders.join(' → ')}`}
+            className={`text-[10px] ${
+              exclusive
+                ? 'bg-violet-500/15 text-violet-300 border-violet-500/30'
+                : 'bg-sky-500/10 text-sky-300 border-sky-500/30'
+            }`}
+          >
+            <Cpu className="w-3 h-3 mr-1" /> Poskli v{chainVersion}
+          </Badge>
+        )}
+      </div>
+      {chainProviders.length > 0 && (
+        <p className="text-[11px] text-zinc-500 -mt-3">
+          Cadeia ativa nesta versão: <span className="font-mono text-zinc-400">{chainProviders.join(' → ')}</span>
+          {exclusive && ' — Experiential exclusivo (sem failover externo)'}
+        </p>
+      )}
 
       <div className="grid grid-cols-3 gap-3">
         <Card className="border-zinc-800 bg-zinc-900/60">

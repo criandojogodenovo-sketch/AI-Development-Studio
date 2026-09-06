@@ -7,10 +7,18 @@
 // testável isoladamente com node:test.
 //
 // Chains por versão (spec do produto):
-//   0.1       : [BAI]                      (GLM/Qwen/Hy3)
-//   0.2       : [BAI, NVIDIA]
-//   0.3.1     : [BAI, NVIDIA, EXPLABS*]    (*somente tarefas difíceis)
-//   1.0-flash : [NVIDIA, EXPLABS, BAI]     (BAI como reserva)
+//   0.1          : [BAI]                      (GLM/Qwen/Hy3)
+//   0.2          : [BAI, NVIDIA]
+//   0.3.1        : [BAI, NVIDIA, EXPLABS*]    (*somente tarefas difíceis)
+//   1.0-flash    : [NVIDIA, EXPLABS, BAI]     (BAI como reserva)
+//   expposkli-1.0: [EXPLABS] — EXCLUSIVO Experiential
+//   expposkli-1.1: [EXPLABS] — EXCLUSIVO Experiential
+//
+// Versões "expposkli-*" são EXCLUSIVAS da Experiential Labs: nenhum
+// outro provider entra no chain — por CONSTRUÇÃO, um failover para
+// NVIDIA/B.AI é impossível. Se a Experiential falhar (após o retry
+// interno com o modelFallback da versão), o erro é propagado com
+// honestidade; sem chave EXPLABS, o chain fica VAZIO (erro controlado).
 //
 // Sem chaves B.AI (sandbox local): o SDK local (zai) substitui o
 // B.AI no chain — a arquitetura de agentes não muda.
@@ -26,11 +34,20 @@
 import { classifyError, type BAIErrorClass } from './error-classes.ts'
 import type { CompletionRequest, CompletionResult, LLMProvider, ProviderName } from './types.ts'
 
-export type PoskliVersion = '0.1' | '0.2' | '0.3.1' | '1.0-flash'
+export type PoskliVersion = '0.1' | '0.2' | '0.3.1' | '1.0-flash' | 'expposkli-1.0' | 'expposkli-1.1'
 export type Difficulty = 'easy' | 'medium' | 'hard'
 export type { ProviderName }
 
-export const POSKLI_VERSIONS: readonly PoskliVersion[] = ['0.1', '0.2', '0.3.1', '1.0-flash'] as const
+export const POSKLI_VERSIONS: readonly PoskliVersion[] = [
+  '0.1', '0.2', '0.3.1', '1.0-flash', 'expposkli-1.0', 'expposkli-1.1',
+] as const
+
+/** Versões EXCLUSIVAS da Experiential Labs (spec expposkli-1.0/1.1). */
+export const EXCLUSIVE_EXPLABS_VERSIONS: readonly PoskliVersion[] = ['expposkli-1.0', 'expposkli-1.1'] as const
+
+export function isExpposkliVersion(v: PoskliVersion): boolean {
+  return (EXCLUSIVE_EXPLABS_VERSIONS as readonly string[]).includes(v)
+}
 
 /** Default = versão do Poskli em produção hoje. */
 export const DEFAULT_POSKLI_VERSION: PoskliVersion = '0.2'
@@ -40,6 +57,8 @@ const CHAINS: Record<PoskliVersion, readonly ProviderName[]> = {
   '0.2': ['bai', 'nvidia'],
   '0.3.1': ['bai', 'nvidia', 'explabs'],
   '1.0-flash': ['nvidia', 'explabs', 'bai'],
+  'expposkli-1.0': ['explabs'],
+  'expposkli-1.1': ['explabs'],
 }
 
 /** Normaliza a versão; valor inválido/ausente → default (0.2). */
@@ -58,7 +77,9 @@ export interface ChainContext {
   difficulty?: Difficulty
 }
 
-/** Resolve o chain ORDENADO de providers para a versão + contexto. */
+/** Resolve o chain ORDENADO de providers para a versão + contexto.
+ *  Versões expposkli-*: chain = [explabs] (exclusivo) — mesmo que B.AI/
+ *  NVIDIA estejam configurados, eles NUNCA entram (sem failover para fora). */
 export function resolveChain(version: PoskliVersion, ctx: ChainContext): ProviderName[] {
   let base: readonly ProviderName[] = CHAINS[version]
   // 0.3.1: EXPLABS participa somente de tarefas difíceis (spec)
@@ -120,6 +141,10 @@ export interface ChainEntry {
   llm: LLMProvider
   /** modelo FÍSICO deste provider para o modelo lógico solicitado */
   model: string
+  /** modelo FÍSICO alternativo do MESMO provider (retry interno —
+   *  usado nas versões expposkli-*: fallback Experiential→Experiential,
+   *  NUNCA um provider externo; 429 nunca dispara retry). */
+  modelFallback?: string
 }
 
 export interface ChainAttempt {
@@ -157,7 +182,13 @@ export async function executeWithChain(
   let lastErr: unknown = null
   for (const entry of entries) {
     try {
-      const result = await entry.llm.complete({ ...req, model: entry.model })
+      const fallback =
+        entry.modelFallback && entry.modelFallback !== entry.model ? entry.modelFallback : undefined
+      const result = await entry.llm.complete({
+        ...req,
+        model: entry.model,
+        ...(fallback ? { modelFallback: fallback } : {}),
+      })
       return { result, provider: entry.provider, attempts }
     } catch (err) {
       lastErr = err

@@ -41,6 +41,8 @@ import {
   type TestRecordSnapshot, type CorrectionSnapshot, type ReviewSnapshot, type VerificationResult,
 } from './state-machine'
 import { classifyError, rateLimitRecord, type PoskliErrorCode } from './errors'
+import { withPoskliVersion } from '../models/version-context.ts'
+import { POSKLI_VERSIONS } from '../models/chain.ts'
 
 // ---------- TIPOS ----------
 
@@ -637,7 +639,16 @@ async function applyCorrection(
 
 // ---------- ORQUESTRADOR PRINCIPAL ----------
 
-export async function runPoskli(runId: string): Promise<void> {
+/**
+ * Executa o run. `poskliVersion` (opcional — seletor de modelos da UI)
+ * define a cadeia de providers do ModelRouter para TODO este run via
+ * AsyncLocalStorage; ausente/inválido → env POSKLI_VERSION decide.
+ */
+export async function runPoskli(runId: string, poskliVersion?: string): Promise<void> {
+  return withPoskliVersion(poskliVersion, () => runPoskliInner(runId))
+}
+
+async function runPoskliInner(runId: string): Promise<void> {
   const run = await db.poskliRun.findUnique({ where: { id: runId } })
   if (!run || run.state === 'CANCELLED') return
 
@@ -1022,9 +1033,15 @@ export interface StartPoskliOptions {
   userId: string
   request: string
   maxIterations?: number
+  /** versão do Poskli escolhida na UI (seletor) — registrada no evento de início */
+  poskliVersion?: string
 }
 
 export async function startPoskli(opts: StartPoskliOptions): Promise<{ runId: string }> {
+  const version =
+    opts.poskliVersion && (POSKLI_VERSIONS as readonly string[]).includes(opts.poskliVersion.trim())
+      ? opts.poskliVersion.trim()
+      : undefined
   const run = await db.poskliRun.create({
     data: {
       projectId: opts.projectId,
@@ -1040,6 +1057,7 @@ export async function startPoskli(opts: StartPoskliOptions): Promise<{ runId: st
     projectId: opts.projectId,
     runId: run.id,
     message: `Poskli iniciado: "${opts.request.slice(0, 120)}"`,
+    data: { poskliVersion: version ?? 'env-default' },
   })
   return { runId: run.id }
 }
