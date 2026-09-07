@@ -105,6 +105,8 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
   // turno ao vivo (run em progresso)
   const [liveRunId, setLiveRunId] = useState<string | null>(null)
   const [liveUserMessage, setLiveUserMessage] = useState<string | null>(null)
+  /** MODO CONVERSA — turnos conversacionais (resposta direta, sem run). */
+  const [convTurns, setConvTurns] = useState<Array<{ id: number; text: string; reply: string }>>([])
   const [liveState, setLiveState] = useState<{ state: string; label: string } | null>(null)
   const [thinkingSecs, setThinkingSecs] = useState(0)
   const [thinkingNote, setThinkingNote] = useState<string | undefined>(undefined)
@@ -442,6 +444,7 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
   useEffect(() => {
     abortLive()
     resetLive()
+    setConvTurns([])
     loadHistory()
     return () => {
       abortLive()
@@ -522,6 +525,13 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
         // contexto ambíguo → o agente PERGUNTA antes de criar
         setClarify({ question: data.question as ClarifyQuestion, draft: text })
         setInput('')
+        return
+      }
+      // MODO CONVERSA — resposta direta do agente (sem run/projeto)
+      if (data.conversation && typeof data.reply === 'string') {
+        setInput('')
+        setClarify(null)
+        setConvTurns((prev) => [...prev, { id: Date.now(), text, reply: data.reply as string }])
         return
       }
       if (!ok) {
@@ -616,9 +626,9 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
     if (!el) return
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
     if (nearBottom) el.scrollTop = el.scrollHeight
-  }, [activity.length, liveResult, liveState?.label, messages.length, thinkingSecs, thinkingNote, livePlan, delegations.length, clarify])
+  }, [activity.length, liveResult, liveState?.label, messages.length, thinkingSecs, thinkingNote, livePlan, delegations.length, clarify, convTurns.length])
 
-  const emptyConversation = !projectId && messages.length === 0 && !liveRunId && !clarify
+  const emptyConversation = !projectId && messages.length === 0 && !liveRunId && !clarify && convTurns.length === 0
 
   const sendDisabled = sending || activeRun || input.trim().length === 0
 
@@ -682,6 +692,14 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
                 label={m.label}
                 durationMs={m.finishedAt && m.startedAt ? Date.parse(m.finishedAt) - Date.parse(m.startedAt) : undefined}
               />
+            </div>
+          ))}
+
+          {/* MODO CONVERSA — turnos conversacionais (resposta direta) */}
+          {!activeRun && convTurns.map((t) => (
+            <div key={t.id} className="space-y-2">
+              <UserBubble text={t.text} />
+              <AgentBubble markdown={t.reply} />
             </div>
           ))}
 

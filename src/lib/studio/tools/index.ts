@@ -10,6 +10,9 @@ import { emitEvent } from '../events/bus'
 import {
   listFilesTool,
   readFileTool,
+  readHeadTool,
+  readRangeTool,
+  readTailTool,
   searchCodeTool,
   createFileTool,
   modifyFileTool,
@@ -29,6 +32,9 @@ import { validateArgs, type ToolCtx, type ToolDefinition, type ToolResult } from
 const ALL_TOOLS: ToolDefinition[] = [
   listFilesTool,
   readFileTool,
+  readHeadTool,
+  readRangeTool,
+  readTailTool,
   searchCodeTool,
   createFileTool,
   modifyFileTool,

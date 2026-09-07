@@ -17,6 +17,7 @@ import {
 } from '../security/path'
 import { workspaceProvider } from '../workspace/db-provider'
 import { validateFileContent, writeFileVerified } from './file-integrity.ts'
+import { formatPartialRead, sliceHead, sliceRange, sliceTail, DEFAULT_LINES } from './partial-read.ts'
 import type { ToolDefinition, ToolResult } from './types'
 
 /** Dual-write persistente: espelha a operação de disco no DB (fonte da verdade).
@@ -413,6 +414,119 @@ export const getProjectStatusTool: ToolDefinition = {
       ok: true,
       output: `WORKSPACE: ${fileCount} arquivos, ${dirCount} diretórios, ${(size / 1024).toFixed(1)}KB\nTipos: ${topExts}`,
       data: { fileCount, dirCount, sizeBytes: size },
+    }
+  },
+}
+
+// ============================================================
+// LEITURA PARCIAL (read_head / read_range / read_tail) — TOON/eficiência
+// Ler arquivos INTEIROS queima contexto: estas tools leem exatamente
+// as linhas necessárias (1-based) e SEMPRE truncam a 2.000 chars.
+// Fallback: disco frio → conteúdo do DB (fonte da verdade).
+// ============================================================
+
+/** Lê o conteúdo (disco → DB) para as tools de leitura parcial. */
+async function readContentForPartial(
+  ctx: { projectId: string; workspaceRoot: string },
+  relPath: string
+): Promise<{ content: string; abs: string; fromDb: boolean } | { error: string }> {
+  const abs = safeResolve(ctx.workspaceRoot, relPath)
+  const stat = await fs.stat(abs).catch(() => null)
+  if (stat?.isDirectory()) return { error: `É um diretório, não arquivo: ${relPath}` }
+  const ext = path.extname(abs).toLowerCase()
+  if ((STUDIO_CONFIG.files.blockedExtensions as readonly string[]).includes(ext)) {
+    return { error: `EXTENSÃO_BLOQUEADA: ${ext}` }
+  }
+  if (stat && stat.size > STUDIO_CONFIG.files.maxFileReadBytes) {
+    // ARQUIVO GRANDE: o read_file recusa — a leitura parcial É o
+    // caminho: carrega, fatia as linhas pedidas e o OUTPUT sai
+    // truncado a 2000 chars (o contexto do agente não sofre).
+    const content = await fs.readFile(abs, 'utf8').catch(() => null)
+    if (content !== null) return { content, abs, fromDb: false }
+  } else if (stat) {
+    const content = await fs.readFile(abs, 'utf8').catch(() => null)
+    if (content !== null) return { content, abs, fromDb: false }
+  }
+  // FALLBACK: disco sem o arquivo (instância fria) → DB persistido
+  const dbFile = await workspaceProvider.readFile(ctx.projectId, relPath).catch(() => null)
+  if (dbFile && dbFile.encoding === 'utf8') {
+    return { content: dbFile.content, abs, fromDb: true }
+  }
+  return { error: `ARQUIVO_NAO_ENCONTRADO: ${relPath}` }
+}
+
+const PARTIAL_READ_DESC =
+  'Leitura parcial por linhas exatas (economia de contexto). Use em vez de read_file sempre que souber a região: ' +
+  '1ª leitura → read_head; região específica (ex.: erro na linha 120) → read_range; final do arquivo → read_tail. ' +
+  'Output numerado "N\tlinha", truncado a 2000 chars.'
+
+export const readHeadTool: ToolDefinition = {
+  name: 'read_head',
+  description: PARTIAL_READ_DESC + ' Lê as primeiras N linhas (padrão 50).',
+  category: 'fs',
+  permissions: ['fs:read'],
+  params: [
+    { name: 'path', type: 'string', required: true, description: 'Caminho relativo ao workspace' },
+    { name: 'lines', type: 'number', required: false, description: 'Nº de linhas (padrão 50, máx 300)' },
+  ],
+  async execute(args, ctx): Promise<ToolResult> {
+    const relPath = String(args.path)
+    const lines = Math.min(Math.max(1, Math.floor(Number(args.lines) ?? DEFAULT_LINES)), 300)
+    const loaded = await readContentForPartial(ctx, relPath)
+    if ('error' in loaded) return { ok: false, output: loaded.error }
+    const result = sliceHead(loaded.content, lines)
+    return {
+      ok: true,
+      output: formatPartialRead(relPath, result),
+      data: { path: relPath, range: result.range, totalLines: result.totalLines, truncated: result.truncated, fromDb: loaded.fromDb },
+    }
+  },
+}
+
+export const readRangeTool: ToolDefinition = {
+  name: 'read_range',
+  description: PARTIAL_READ_DESC + ' Lê o intervalo inclusivo [startLine, endLine] (1-based).',
+  category: 'fs',
+  permissions: ['fs:read'],
+  params: [
+    { name: 'path', type: 'string', required: true, description: 'Caminho relativo ao workspace' },
+    { name: 'startLine', type: 'number', required: true, description: 'Primeira linha (1-based)' },
+    { name: 'endLine', type: 'number', required: true, description: 'Última linha (inclusivo)' },
+  ],
+  async execute(args, ctx): Promise<ToolResult> {
+    const relPath = String(args.path)
+    const startLine = Number(args.startLine)
+    const endLine = Number(args.endLine)
+    const loaded = await readContentForPartial(ctx, relPath)
+    if ('error' in loaded) return { ok: false, output: loaded.error }
+    const result = sliceRange(loaded.content, startLine, endLine)
+    return {
+      ok: result.ok,
+      output: formatPartialRead(relPath, result),
+      data: { path: relPath, range: result.range, totalLines: result.totalLines, truncated: result.truncated, fromDb: loaded.fromDb },
+    }
+  },
+}
+
+export const readTailTool: ToolDefinition = {
+  name: 'read_tail',
+  description: PARTIAL_READ_DESC + ' Lê as últimas N linhas (padrão 50).',
+  category: 'fs',
+  permissions: ['fs:read'],
+  params: [
+    { name: 'path', type: 'string', required: true, description: 'Caminho relativo ao workspace' },
+    { name: 'lines', type: 'number', required: false, description: 'Nº de linhas (padrão 50, máx 300)' },
+  ],
+  async execute(args, ctx): Promise<ToolResult> {
+    const relPath = String(args.path)
+    const lines = Math.min(Math.max(1, Math.floor(Number(args.lines) ?? DEFAULT_LINES)), 300)
+    const loaded = await readContentForPartial(ctx, relPath)
+    if ('error' in loaded) return { ok: false, output: loaded.error }
+    const result = sliceTail(loaded.content, lines)
+    return {
+      ok: true,
+      output: formatPartialRead(relPath, result),
+      data: { path: relPath, range: result.range, totalLines: result.totalLines, truncated: result.truncated, fromDb: loaded.fromDb },
     }
   },
 }

@@ -47,7 +47,7 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
     role: 'master',
     modelRole: 'master', // GLM-5.3-Flash
     systemPrompt: SYSTEM_PROMPTS.master,
-    allowedTools: ['list_files', 'read_file', 'search_code', 'get_project_status', 'ask_user_question', 'web_search'],
+    allowedTools: ['list_files', 'read_file', 'read_head', 'read_range', 'read_tail', 'search_code', 'get_project_status', 'ask_user_question', 'web_search'],
     maxSteps: 8,
     maxRetries: 2,
     timeoutMs: 300_000,
@@ -62,7 +62,7 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
     modelRole: 'coding', // Qwen3.8-Flash
     systemPrompt: SYSTEM_PROMPTS.coding,
     allowedTools: [
-      'list_files', 'read_file', 'search_code', 'create_file',
+      'list_files', 'read_file', 'read_head', 'read_range', 'read_tail', 'search_code', 'create_file',
       'modify_file', 'delete_file', 'create_directory',
       'run_command', 'run_tests', 'git_status', 'git_diff', 'git_log',
       'godot_check', 'ask_user_question', 'web_search',
@@ -80,7 +80,7 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
     role: 'review',
     modelRole: 'review', // Hy3
     systemPrompt: SYSTEM_PROMPTS.review,
-    allowedTools: ['list_files', 'read_file', 'search_code', 'git_diff', 'git_log', 'run_tests'],
+    allowedTools: ['list_files', 'read_file', 'read_head', 'read_range', 'read_tail', 'search_code', 'git_diff', 'git_log', 'run_tests'],
     maxSteps: 15,
     maxRetries: 2,
     timeoutMs: 300_000,
@@ -95,7 +95,7 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
     modelRole: 'review', // Hy3
     systemPrompt: SYSTEM_PROMPTS.testing,
     allowedTools: [
-      'list_files', 'read_file', 'search_code',
+      'list_files', 'read_file', 'read_head', 'read_range', 'read_tail', 'search_code',
       'create_file', 'modify_file', 'run_command', 'run_tests', 'web_search',
     ],
     maxSteps: 20,

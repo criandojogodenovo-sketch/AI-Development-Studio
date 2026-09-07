@@ -11,6 +11,9 @@ import {
   classifyIntent, clarifyQuestion, resolveTypeFromAnswer, projectNameFromMessage,
 } from '@/lib/studio/projects/intent-router'
 import { emitEvent } from '@/lib/studio/events/bus'
+import { modelRouter } from '@/lib/studio/models/router'
+import { conversationModeFor } from '@/lib/studio/poskli/fast-plan.ts'
+import { detectLang } from '@/lib/studio/poskli/toon.ts'
 import {
   friendlyRunState, isThinkingState, isChatTerminal, isQuotaErrorCode,
   safeRunResult, activityToChatEvent, encodeSseEvent, QUOTA_EXHAUSTED_MESSAGE,
@@ -75,6 +78,33 @@ export async function POST(req: Request) {
 
   if (message.length < 5) {
     return NextResponse.json({ error: 'MENSAGEM_INVÁLIDA (descreva o que deseja, mín 5 caracteres)' }, { status: 400 })
+  }
+
+  // ---- 0. MODO CONVERSA (sem verbos de ação) ----
+  // "Olá, como estás?" / "obrigado!" são CONVERSA, não trabalho:
+  // resposta direta do master SEM criar projeto, SEM run, SEM
+  // tools (1 chamada LLM leve vs um run completo de agente).
+  const conversation = conversationModeFor(message)
+  if (conversation.conversation) {
+    const lang = detectLang(message)
+    try {
+      const reply = await modelRouter.chatRole('master', [
+        {
+          role: 'system',
+          content:
+            'Você é o assistente do AI Development Studio (Poskli). O usuário enviou uma mensagem ' +
+            'CONVERSACIONAL (não é um pedido de trabalho). ' + conversation.hint,
+        },
+        { role: 'user', content: message },
+      ], { temperature: 0.7, maxTokens: 400 })
+      const text = (reply.content ?? '').trim()
+      if (text) {
+        return NextResponse.json({ conversation: true, reply: text.slice(0, 4000), lang })
+      }
+    } catch {
+      // modelo indisponível → segue o fluxo normal (run), nunca
+      // bloqueia a conversa por falha de infraestrutura
+    }
   }
 
   // ---- 1. projeto destino: existente OU criado automaticamente ----

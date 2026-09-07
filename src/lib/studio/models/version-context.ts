@@ -18,6 +18,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { POSKLI_VERSIONS, type PoskliVersion } from './chain.ts'
+import type { Difficulty, TaskKind } from '../poskli/toon.ts'
 
 const versionStorage = new AsyncLocalStorage<PoskliVersion>()
 
@@ -37,4 +38,32 @@ export function withPoskliVersion<T>(version: string | undefined, fn: () => Prom
 /** Versão ativa deste contexto async (undefined = usar a env). */
 export function requestPoskliVersion(): PoskliVersion | undefined {
   return versionStorage.getStore()
+}
+
+// ---------- PERFIL DA TAREFA (agent pool por dificuldade) ----------
+
+/**
+ * Perfil da tarefa detetado pelo TOON (parseRequestToTOON) no início
+ * do run: dificuldade (simple/medium/hard/complex) + tipo
+ * (web/logic/research/…). O ModelRouter lê este perfil via ALS e
+ * seleciona as rotas do AGENT POOL no lugar das VERSION_ROUTES —
+ * os modelos deixam de ser fixos por papel.
+ */
+export interface PoskliTaskProfile {
+  difficulty: Difficulty
+  kind: TaskKind
+  /** Linha TOON compacta (intenção + idioma) para prompts/eventos. */
+  toon: string
+}
+
+const taskProfileStorage = new AsyncLocalStorage<PoskliTaskProfile>()
+
+/** Executa fn com o perfil da tarefa ativo (run inteiro). */
+export function withPoskliTaskProfile<T>(profile: PoskliTaskProfile, fn: () => Promise<T>): Promise<T> {
+  return taskProfileStorage.run(profile, fn)
+}
+
+/** Perfil ativo deste contexto async (undefined = usar VERSION_ROUTES). */
+export function requestPoskliTaskProfile(): PoskliTaskProfile | undefined {
+  return taskProfileStorage.getStore()
 }

@@ -13,9 +13,10 @@
 //      comunicam diretamente entre si — todo resultado volta ao
 //      orquestrador, que decide o próximo passo.
 //   2. Cada subagente tem ORÇAMENTO PRÓPRIO (tokens + tool calls):
-//        coding: 30.000 tokens · 20 tool calls
-//        testing: 10.000 tokens · 5 tool calls
-//        review: 10.000 tokens · 5 tool calls
+//        SEM dificuldade (compat): coding 30.000·20 · testing 10.000·5 ·
+//        review 10.000·5
+//        COM dificuldade (ELÁSTICO — TOON): coding 150k–300k ·
+//        testing 20k–35k · review 15k–25k (+ master 30k–45k)
 //     Excedeu → "Orçamento atingido, a terminar" (para honesto).
 //   3. Contexto MÍNIMO por subagente: o orquestrador envia apenas
 //      o necessário (tarefa + diff/testes — nunca o projeto todo).
@@ -24,6 +25,9 @@
 // ============================================================
 
 export type DelegationRole = 'coding' | 'testing' | 'review'
+
+/** Dificuldade da tarefa (TOON) — orçamento elástico por dificuldade. */
+export type TaskDifficulty = 'simple' | 'medium' | 'hard' | 'complex'
 
 export interface SubagentBudget {
   role: DelegationRole
@@ -35,17 +39,65 @@ export interface SubagentBudget {
   maxTokens: number
 }
 
-/** Orçamentos por subagente (pedido do usuário). */
+/** Orçamentos por subagente SEM dificuldade (fixos — compat).
+ *  Corrigido p/ os ELÁSTICOS quando a dificuldade é conhecida. */
 export const SUBAGENT_BUDGETS: Readonly<Record<DelegationRole, SubagentBudget>> = {
   coding: { role: 'coding', label: 'agente de programação', maxToolCalls: 20, maxTokens: 30_000 },
   testing: { role: 'testing', label: 'agente de testes', maxToolCalls: 5, maxTokens: 10_000 },
   review: { role: 'review', label: 'agente de revisão', maxToolCalls: 5, maxTokens: 10_000 },
 }
 
-/** Orçamento do papel (coding/testing/review); outros → null. */
-export function subagentBudgetFor(role: string): SubagentBudget | null {
+// ---------- ORÇAMENTO ELÁSTICO (pool por dificuldade) ----------
+
+/** Orçamento total do run por papel para cada dificuldade. */
+export interface ElasticBudget {
+  coding: number
+  testing: number
+  review: number
+  master: number
+}
+
+/**
+ * ORÇAMENTO ELÁSTICO — o teto de tokens por papel escala com a
+ * dificuldade detetada pelo TOON. Motivação: "Faz um site sobre
+ * gatos" (simple) morria com MAX_LIMITS_REACHED no teto fixo de
+ * 30k do coding; 150k dá folga real, e tarefas complexas
+ * recebem até 300k sem inflar o custo das simples.
+ */
+export const ELASTIC_BUDGETS: Readonly<Record<TaskDifficulty, ElasticBudget>> = {
+  simple: { coding: 150_000, testing: 20_000, review: 15_000, master: 30_000 },
+  medium: { coding: 200_000, testing: 25_000, review: 18_000, master: 35_000 },
+  hard: { coding: 250_000, testing: 30_000, review: 20_000, master: 40_000 },
+  complex: { coding: 300_000, testing: 35_000, review: 25_000, master: 45_000 },
+}
+
+/** Orçamento elástico do run para a dificuldade (spec do usuário). */
+export function getBudgetForTask(difficulty: TaskDifficulty): ElasticBudget {
+  return ELASTIC_BUDGETS[difficulty] ?? ELASTIC_BUDGETS.simple
+}
+
+/** Tool calls elásticos por papel×dificuldade (coding 20→30, resto 5→10). */
+const ELASTIC_TOOL_CALLS: Readonly<Record<TaskDifficulty, Record<DelegationRole, number>>> = {
+  simple: { coding: 20, testing: 5, review: 5 },
+  medium: { coding: 24, testing: 6, review: 6 },
+  hard: { coding: 26, testing: 8, review: 8 },
+  complex: { coding: 30, testing: 10, review: 10 },
+}
+
+/** Orçamento do papel (coding/testing/review); outros → null.
+ *  COM dificuldade → ELÁSTICO (150k–300k no coding) — o fixo de
+ *  30k era a causa raiz do MAX_LIMITS_REACHED em runs legítimos. */
+export function subagentBudgetFor(role: string, difficulty?: TaskDifficulty): SubagentBudget | null {
   const key = (role ?? '').trim().toLowerCase() as DelegationRole
-  return key in SUBAGENT_BUDGETS ? SUBAGENT_BUDGETS[key] : null
+  if (!(key in SUBAGENT_BUDGETS)) return null
+  const base = SUBAGENT_BUDGETS[key]
+  if (!difficulty || !(difficulty in ELASTIC_BUDGETS)) return base
+  const elastic = getBudgetForTask(difficulty)
+  return {
+    ...base,
+    maxTokens: elastic[key],
+    maxToolCalls: ELASTIC_TOOL_CALLS[difficulty][key],
+  }
 }
 
 export interface BudgetDecision {
@@ -56,9 +108,9 @@ export interface BudgetDecision {
 
 const BUDGET_STOP_MESSAGE = 'Orçamento atingido, a terminar'
 
-/** Orçamento de TOKENS do subagente excedeu? */
-export function tokenBudgetDecision(role: string, tokensUsed: number): BudgetDecision {
-  const b = subagentBudgetFor(role)
+/** Orçamento de TOKENS do subagente excedeu? (opcional: dificuldade elástica). */
+export function tokenBudgetDecision(role: string, tokensUsed: number, difficulty?: TaskDifficulty): BudgetDecision {
+  const b = subagentBudgetFor(role, difficulty)
   if (!b || tokensUsed < b.maxTokens) return { exceeded: false }
   return {
     exceeded: true,
@@ -66,9 +118,9 @@ export function tokenBudgetDecision(role: string, tokensUsed: number): BudgetDec
   }
 }
 
-/** Orçamento de TOOL CALLS do subagente excedeu? */
-export function toolBudgetDecision(role: string, toolCallsUsed: number): BudgetDecision {
-  const b = subagentBudgetFor(role)
+/** Orçamento de TOOL CALLS do subagente excedeu? (opcional: dificuldade elástica). */
+export function toolBudgetDecision(role: string, toolCallsUsed: number, difficulty?: TaskDifficulty): BudgetDecision {
+  const b = subagentBudgetFor(role, difficulty)
   if (!b || toolCallsUsed < b.maxToolCalls) return { exceeded: false }
   return {
     exceeded: true,

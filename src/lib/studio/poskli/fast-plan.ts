@@ -17,6 +17,8 @@
 // ZERO imports de runtime → testável com node:test.
 // ============================================================
 
+import { isConversational } from './toon.ts'
+
 export interface PlanMode {
   /** true → instrui o master a produzir o plano JÁ no 1º passo. */
   fast: boolean
@@ -80,4 +82,31 @@ export function planModeFor(request: string): PlanMode {
 export function isSimpleBuildRequest(request: string): boolean {
   const mode = planModeFor(request)
   return mode.fast
+}
+
+// ---------- MODO CONVERSA (TOON) ----------
+
+export interface ConversationDecision {
+  /** true → resposta direta do master, SEM run, SEM tools, SEM projeto. */
+  conversation: boolean
+  /** Linha adicionada ao prompt quando conversa. */
+  hint: string
+}
+
+/**
+ * MODO CONVERSA: pedidos SEM verbos de ação ("Olá, como estás?",
+ * "obrigado!", "isso é interessante") são conversa, não trabalho —
+ * o master responde LIVREMENTE sem criar projeto/run (custo mínimo:
+ * ~1 chamada LLM de poucos tokens vs um run completo de agente).
+ */
+export function conversationModeFor(request: string): ConversationDecision {
+  const conversational = isConversational((request ?? '').trim())
+  return {
+    conversation: conversational,
+    hint: conversational
+      ? 'Responda de forma natural, curta e amigável, no idioma do usuário. ' +
+        'Se o usuário parecer querer TRABALHO a seguir, termine sugerindo o que pode pedir ' +
+        '(ex.: "posso criar um site, uma app ou um jogo — é só pedir").'
+      : '',
+  }
 }

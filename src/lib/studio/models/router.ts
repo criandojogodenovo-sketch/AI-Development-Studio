@@ -40,8 +40,10 @@ import {
   type PoskliVersion,
   type ProviderName,
   type RouteRole,
+  type RouteStop,
 } from './chain'
-import { requestPoskliVersion } from './version-context.ts'
+import { requestPoskliVersion, requestPoskliTaskProfile } from './version-context.ts'
+import { routesForTaskProfile } from '../poskli/agent-pool.ts'
 import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, ModelRole } from './types'
 
 // ---------- REGISTRO DE MODELOS LÓGICOS ----------
@@ -190,6 +192,10 @@ export class ModelRouter {
   }
 
   /** Paradas da rota (provider + modelo físico) para um papel na versão ativa.
+   *  AGENT POOL (por dificuldade): quando o run tem um perfil de
+   *  tarefa ativo (TOON → withPoskliTaskProfile), as rotas vêm do
+   *  POOL por dificuldade (simple/medium/hard/complex) em vez das
+   *  VERSION_ROUTES — o modelo deixa de ser fixo por papel.
    *  Sandbox sem chaves B.AI: zai substitui o bai; sem NVIDIA: paradas
    *  nvidia são omitidas (rota encurta honestamente). */
   private routeEntries(
@@ -198,7 +204,14 @@ export class ModelRouter {
   ): { entries: ChainEntry[]; version: PoskliVersion } {
     const version = this.activeVersion()
     const ctx = this.chainContext(difficulty)
-    const stops = VERSION_ROUTES[version][role]
+    const profile = requestPoskliTaskProfile()
+    const stops = profile
+      ? (routesForTaskProfile({ difficulty: profile.difficulty, kind: profile.kind })[role] as readonly {
+          provider: ProviderName
+          model: LogicalModelKey
+          onRateLimit?: RouteStop['onRateLimit']
+        }[])
+      : VERSION_ROUTES[version][role]
     const entries: ChainEntry[] = []
     for (const stop of stops) {
       let provider: ProviderName = stop.provider
@@ -235,11 +248,18 @@ export class ModelRouter {
     }
   }
 
-  /** Modelo lógico PRINCIPAL do papel na versão ativa (auditoria/DB). */
+  /** Modelo lógico PRINCIPAL do papel na versão ativa (auditoria/DB).
+   *  Com perfil de tarefa ativo (pool por dificuldade), devolve o
+   *  modelo lógico da PRIMEIRA parada do POOL para o papel. */
   modelForRole(role: ModelRole): string {
     if (role === 'deepseek') return STUDIO_CONFIG.models.deepseek
     const r3 = this.routeRoleOf(role)
     if (r3) {
+      const profile = requestPoskliTaskProfile()
+      if (profile) {
+        const first = routesForTaskProfile({ difficulty: profile.difficulty, kind: profile.kind })[r3][0]
+        if (first) return LOGICAL_TO_REGISTRY[first.model as LogicalModelKey] ?? STUDIO_CONFIG.models.master
+      }
       const version = this.activeVersion()
       const stops = VERSION_ROUTES[version][r3]
       const first = stops[0]

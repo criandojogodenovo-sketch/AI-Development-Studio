@@ -45,14 +45,17 @@ import {
   type TestRecordSnapshot, type CorrectionSnapshot, type ReviewSnapshot, type VerificationResult,
 } from './state-machine'
 import { classifyError, type PoskliErrorCode } from './errors'
-import { withPoskliVersion, requestPoskliVersion } from '../models/version-context.ts'
+import { withPoskliVersion, requestPoskliVersion, withPoskliTaskProfile, requestPoskliTaskProfile, type PoskliTaskProfile } from '../models/version-context.ts'
 import { POSKLI_VERSIONS } from '../models/chain.ts'
 import { failureSignature, agenticFixBudget, agenticFixDecision } from './loop-guard.ts'
 import { taskText } from '../orchestrator/task-text.ts'
 import { budgetFor } from './budget.ts'
 import { buildCorrectionContext } from './correction-context.ts'
 import { planModeFor } from './fast-plan.ts'
-import { subagentBudgetFor, clampSubagentBudgets, delegationMessage } from './delegation.ts'
+import { subagentBudgetFor, clampSubagentBudgets, delegationMessage, getBudgetForTask } from './delegation.ts'
+import { buildToonTask, parseRequestToTOON } from './toon.ts'
+import { agentsForProfile } from './agent-pool.ts'
+import platformInstructions from './instructions.json'
 
 // ---------- TIPOS ----------
 
@@ -127,6 +130,9 @@ interface PoskliContext {
   /** FASE 2 — orçamento por NÍVEL (0.1/0.2/0.3.1/1.0-flash/superagent):
    *  tool calls, steps, timeout e contexto de arquivos. */
   budget: ReturnType<typeof budgetFor>
+  /** AGENT POOL — perfil da tarefa (TOON: dificuldade + tipo) que
+   *  seleciona os modelos por papel e o orçamento ELÁSTICO. */
+  taskProfile?: PoskliTaskProfile
   /** Registros com identidade (nunca duplicados por re-render/polling). */
   testRecords: TestRecord[]
   corrections: CorrectionRecord[]
@@ -381,6 +387,20 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
   // PRIMEIRO passo, sem pesquisas/inspeções obrigatórias.
   const planMode = planModeFor(ctx.request)
 
+  // AGENT POOL — linha TOON compacta (classificação do pedido) +
+  // INSTRUÇÕES DA PLATAFORMA (instructions.json): regras always/
+  // never que poupam tokens e evitam ficheiros/testes desnecessários
+  const toonLine = ctx.taskProfile?.toon ?? parseRequestToTOON(ctx.request)
+  const rules = platformInstructions.agentRules as { always: string[]; never: string[] }
+  const instructionsBlock = [
+    `PEDIDO (TOON): ${toonLine}`,
+    'DIFICULDADE: ' + (ctx.taskProfile?.difficulty ?? buildToonTask(ctx.request).difficulty) +
+      ' — o orçamento dos subagentes escala com ela',
+    'REGRAS DA PLATAFORMA (obrigatórias):',
+    ...rules.always.map((r) => `- ${r}`),
+    ...rules.never.map((r) => `- NUNCA: ${r.toLowerCase()}`),
+  ].join('\n')
+
   const out = await runAgent(
     {
       agent: master,
@@ -390,6 +410,8 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
       poskliRunId: ctx.runId,
       objective: [
         `Pedido do usuário: "${ctx.request}"`,
+        '',
+        `## CLASSIFICAÇÃO DO PEDIDO (TOON)\n${instructionsBlock}`,
         '',
         `## RITMO RECOMENDADO PARA ESTE PEDIDO\n${planMode.hint}`,
         '',
@@ -488,11 +510,13 @@ async function implementTask(
   await transitionTask(task.id, 'RUNNING', { attempts: { increment: 1 }, input: { description: task.description, agentRole: task.agentRole, poskli: ctx.runId } as object })
   await emitEvent({ type: 'task.started', projectId: ctx.projectId, taskId: task.id, runId: ctx.runId, agent: agent.id, message: `Poskli — implementando: ${task.title}` })
 
-  // DELEGAÇÃO — orçamentos ESPECÍFICOS do subagente (coding 20
-  // tools/30k tokens · testing 5/10k · review 5/10k), clamped ao
-  // nível do Poskli (o menor vence). Excedeu → "Orçamento atingido,
-  // a terminar" no resultado (AgentRunner).
-  const subBudget = subagentBudgetFor(task.agentRole)
+  // DELEGAÇÃO — orçamentos ESPECÍFICOS do subagente, ELÁSTICOS por
+  // dificuldade do pedido (TOON: simple 150k/20 · medium 200k/24 ·
+  // hard 250k/26 · complex 300k/30 no coding; testing/review
+  // 15k-35k), clamped ao nível do Poskli (o menor vence). Sem
+  // perfil (compat): fixos 30k/10k/10k. Excedeu → "Orçamento
+  // atingido, a terminar" (AgentRunner).
+  const subBudget = subagentBudgetFor(task.agentRole, ctx.taskProfile?.difficulty)
   const subClamp = subBudget ? clampSubagentBudgets(ctx.budget, subBudget) : null
   const toolCallCap = subClamp
     ? subClamp.maxToolCalls
@@ -508,6 +532,7 @@ async function implementTask(
       poskliRunId: ctx.runId,
       objective: [
         `TAREFA: ${task.title}`,
+        ctx.taskProfile ? `CONTEXTO (TOON): ${ctx.taskProfile.toon}` : '',
         '',
         `DESCRIÇÃO:\n${task.description}`,
         extraContext ? `\n## CONTEXTO ADICIONAL\n${extraContext}` : '',
@@ -722,8 +747,25 @@ async function applyCorrection(
  * define a cadeia de providers do ModelRouter para TODO este run via
  * AsyncLocalStorage; ausente/inválido → env POSKLI_VERSION decide.
  */
+/** AGENT POOL — deteta o perfil da tarefa (TOON) do run e envolve
+ *  a execução: o ModelRouter passa a selecionar os modelos por
+ *  DIFICULDADE (simple/medium/hard/complex) via ALS, e o orçamento
+ *  dos subagentes fica ELÁSTICO (150k–300k). */
 export async function runPoskli(runId: string, poskliVersion?: string): Promise<void> {
-  return withPoskliVersion(poskliVersion, () => runPoskliInner(runId))
+  const run = await db.poskliRun.findUnique({ where: { id: runId } }).catch(() => null)
+  const request = (run?.request ?? '').trim()
+  if (!request) {
+    return withPoskliVersion(poskliVersion, () => runPoskliInner(runId))
+  }
+  const toonTask = buildToonTask(request)
+  const profile: PoskliTaskProfile = {
+    difficulty: toonTask.difficulty,
+    kind: toonTask.kind,
+    toon: parseRequestToTOON(request),
+  }
+  return withPoskliVersion(poskliVersion, () =>
+    withPoskliTaskProfile(profile, () => runPoskliInner(runId))
+  )
 }
 
 async function runPoskliInner(runId: string): Promise<void> {
@@ -742,6 +784,10 @@ async function runPoskliInner(runId: string): Promise<void> {
   // limita tool calls, steps, timeout e contexto por agente.
   const levelBudget = budgetFor(requestPoskliVersion() ?? STUDIO_CONFIG.router.poskliVersion)
 
+  // AGENT POOL — perfil da tarefa (TOON): dificuldade → seleção de
+  // modelos por papel + orçamento ELÁSTICO dos subagentes
+  const taskProfile = requestPoskliTaskProfile() ?? undefined
+
   const ctx: PoskliContext = {
     runId,
     projectId: run.projectId,
@@ -756,6 +802,7 @@ async function runPoskliInner(runId: string): Promise<void> {
     evidence: [],
     plan: { architecture: '', stack: [], tasks: [] },
     budget: levelBudget,
+    taskProfile,
     testRecords: [],
     corrections: [],
     review: { status: 'NOT_RUN', attempts: 0 },
@@ -764,6 +811,31 @@ async function runPoskliInner(runId: string): Promise<void> {
 
   try {
     await db.project.update({ where: { id: ctx.projectId }, data: { status: 'RUNNING' } }).catch(() => {})
+
+    // FASE VISÍVEL — análise (AGENT POOL): o usuário vê a classificação
+    // TOON do pedido, os agentes selecionados e o orçamento elástico
+    // ANTES do plano ("A analisar o pedido…" → "Plano: …")
+    if (ctx.taskProfile) {
+      const agents = agentsForProfile({ difficulty: ctx.taskProfile.difficulty, kind: ctx.taskProfile.kind })
+      const elastic = getBudgetForTask(ctx.taskProfile.difficulty)
+      await emitEvent({
+        type: 'run.analyzed', // evento informativo (não muda estado)
+        projectId: ctx.projectId,
+        runId: ctx.runId,
+        agent: 'master',
+        message:
+          `A analisar o pedido — ${ctx.taskProfile.toon} → agentes: ` +
+          `programação ${agents.coding}, revisão ${agents.review} · orçamento elástico ` +
+          `${Math.round(elastic.coding / 1000)}k tokens`,
+        data: {
+          toon: ctx.taskProfile.toon,
+          difficulty: ctx.taskProfile.difficulty,
+          kind: ctx.taskProfile.kind,
+          agents,
+          budget: elastic,
+        },
+      })
+    }
 
     // snapshot pré-execução (restaurável via Workspace Snapshots)
     await workspaceProvider.snapshot(ctx.projectId, `Poskli: ${ctx.request.slice(0, 60)}`, 'poskli').catch(() => {})
