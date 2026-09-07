@@ -557,3 +557,36 @@ Stage Summary:
 ### 6. Testes: 134/134 (+21)
 - question-format 6 · compaction 5 · loop-guard 5 · activity+modes+godot-format 5 (4 suites novas)
 - tsc: 13 erros pré-existentes, ZERO novos · eslint limpo · next build EXIT 0 (rota /api/poskli/[id]/answer no output)
+
+## Tarefa: Redesenhar o Poskli como chat agêntico conversacional (estilo Grok/ChatGPT) — b4cd205
+
+**Commit:** `feat: redesign poskli as conversational agentic chat` (b4cd205, push 1f86135..b4cd205)
+
+### 1. Interface (UI)
+- Chat central (`src/components/studio/chat/`): chat-view + chat-bubbles + activity-log — mensagens do utilizador à direita, progresso do agente como bolhas de sistema estilizadas; sem terminal/código no fluxo principal
+- Activity Log: "A pensar durante Xs…", "A ler arquivo…", "A executar comando npm test…", "A pesquisar na web…", "A gerar imagens…"
+- Editor/Terminal/Preview/Execução OCULTOS por defeito atrás de "Ver Detalhes Técnicos" (painel colapsável, workspace reescrito)
+- Nav: Chat primário (default, sem necessidade de projeto); view "Modelos" REMOVIDA (zero nomes técnicos na UI)
+
+### 2. Criação automática de projeto
+- `intent-router.ts` (puro): classifyIntent/clarifyQuestion/resolveTypeFromAnswer/projectNameFromMessage
+- POST /api/chat e POST /api/projects sem `type` → detetam do contexto; ambíguo ("Cria uma app") → needsClarification + pergunta no chat; seletor de tipo removido da UI de criação
+
+### 3. /api/chat
+- POST: mensagem → run (auto-cria projeto; after() para execução)
+- GET ?project= histórico da conversa; GET ?run= → SSE (state/thinking/activity/question/quota/result/done), 240s com heartbeat implícito por tick 1.5s
+- Cliente: fetch-stream com reconexão (5x) + fallback polling (/api/poskli/:id) com os MESMOS eventos (deriveChatEvents puro partilhado)
+- 429/quota → mensagem exata: "A cota do modelo acabou. A mudar para o modelo reserva…"
+
+### 4. Correções durante a verificação browser
+- SSE consultava ToolCall por runId do Poskli (errado — é runId do AGENTE) → agora projectId + createdAt >= run.startedAt
+- finalizeTurn reconcilia com o SERVIDOR após done (refs podiam ser limpos por remount — turno vazio); retentativas de stream esgotadas → polling contínuo
+- StatusBubble durante IMPLEMENTING sem tools; label "Pergunta respondida"; Select control warning; estágios mortos ocultos no painel técnico
+
+### 5. Testes: 176/176 (+10)
+- intent-router 4 · chat-events 6 (labels naturais SEM rótulos de estágio, quota exata, SSE parseável, deriveChatEvents) · activity estendida (command/query/web_search/generate_image)
+- tsc: 13 pré-existentes, ZERO novos · eslint limpo · next build EXIT 0 (/api/chat no output)
+
+### 6. Verificação local + deploy
+- Postgres 18 embutido local (porta 5433) + dev server + browser real: login, envio, auto-criação, clarify, modal ask_user_question (respondido pela UI), Activity Log ao vivo, detalhes técnicos, resultado final com quota — 10 screenshots em /home/z/my-project/download/poskli-chat-evidence/
+- Deploy Vercel: novo chunk 4d42b5c407542c41.js com as strings do chat; /api/chat 401 sem auth; GET / 200
