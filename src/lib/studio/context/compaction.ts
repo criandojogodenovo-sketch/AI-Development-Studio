@@ -139,3 +139,53 @@ export function compactConversation(
   })
   return [...compacted, ...recent]
 }
+
+// ============================================================
+// SLIM DO CONTEXTO INICIAL (FASE 2 — auditoria de tokens)
+// ============================================================
+// O maior desperdício medido: o bloco de contexto (arquivos +
+// schemas de tools, ~30k chars) é reenviado a CADA chamada do
+// modelo (média medida: 4.271 tokens IN/passo). Após os
+// primeiros passos o agente JÁ leu o que precisava via tools —
+// o bloco de arquivos vira um resumo de estado (o que importa).
+//
+// O emagrecimento mantém o OBJETIVO (a 1ª seção da mensagem) e
+// substitui o resto pelo bloco de estado — coerência preservada.
+
+/** Seção que marca o fim do objetivo na mensagem de contexto. */
+const CONTEXT_SECTION_RE = /\n## (FERRAMENTAS DISPONÍVEIS|CONTEXTO DO PROJETO)/
+
+/** Extrai o OBJETIVO puro (antes dos blocos de contexto/tools). */
+export function objectivePortion(messageContent: string): string {
+  const m = messageContent.match(CONTEXT_SECTION_RE)
+  return (m ? messageContent.slice(0, m.index) : messageContent).trim()
+}
+
+/**
+ * Emagrece a mensagem inicial de contexto depois que o agente já
+ * operou alguns passos: mantém o objetivo + injeta o estado real
+ * (arquivos tocados, testes) no lugar dos blocões de arquivos.
+ * Puro — testável com node:test.
+ */
+export function slimContextMessage(
+  originalContent: string,
+  progress: AgentProgressState,
+  opts?: { keepFileList?: boolean }
+): string {
+  const objective = objectivePortion(originalContent)
+  const lines: string[] = [objective]
+  if (opts?.keepFileList !== false && progress.filesTouched.length > 0) {
+    lines.push(
+      `[CONTEXTO COMPACTADO — os arquivos do projeto já foram lidos/editados por você via tools]`,
+      `ARQUIVOS RELEVANTES JÁ TRABALHADOS: ${progress.filesTouched.join(', ')}`,
+      `Releia com read_file APENAS o trecho que faltar (use search_code para localizar).`
+    )
+  } else {
+    lines.push(
+      '[CONTEXTO COMPACTADO — os arquivos do projeto já estão no histórico das tools acima]'
+    )
+  }
+  lines.push(renderStateBlock(progress))
+  return lines.join('\n')
+}
+

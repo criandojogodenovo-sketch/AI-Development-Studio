@@ -4,6 +4,8 @@
 // e pelo ExecutionProvider (local/docker/remote).
 // ============================================================
 
+import fs from 'fs/promises'
+import path from 'path'
 import { getExecutionProvider } from '../executor/provider'
 import { emitEvent } from '../events/bus'
 import type { ToolDefinition, ToolResult } from './types'
@@ -64,7 +66,10 @@ export const runCommandTool: ToolDefinition = {
 
 /**
  * run_tests — executa testes conforme o tipo do projeto.
- * O pipeline chama esta tool após implementações (Perfection Loop).
+ * FASE 2 — auditoria: deteta o runner pelo package.json ANTES de
+ * spawnar (a cascata fixa de 5 candidatos custava até 5 processos
+ * por chamada; `node --test test/*.test.js` nunca funcionou sem
+ * shell — glob literal — e o runner python rodava em projetos JS).
  */
 export const runTestsTool: ToolDefinition = {
   name: 'run_tests',
@@ -85,22 +90,16 @@ export const runTestsTool: ToolDefinition = {
     })
 
     const custom = args.command ? String(args.command) : undefined
+    // 1º candidato: runner declarado no package.json (0 spawns extras)
     const candidates = custom
       ? [custom]
-      : [
-          'node --test',              // auto-discovery (invocação correta Node 22+)
-          'node --test test/game.test.js',
-          'node --test test/*.test.js',
-          'npm test',
-          'python3 -m unittest discover -s tests',
-        ]
+      : await detectTestCandidates(ctx.workspaceRoot)
 
     const provider = getExecutionProvider()
-    let last: ReturnType<typeof summarizeExec> extends never ? never : string = ''
+    let last = ''
     for (const cmd of candidates) {
       const res = await provider.execute({ command: cmd, cwd: ctx.workspaceRoot, label: 'run_tests' })
       last = summarizeExec(res)
-      // exit 0 = sucesso; exit != 0 mas com saída de "no tests" = tenta próximo
       if (res.exitCode === 0) {
         await emitEvent({
           type: 'test.passed',
@@ -116,7 +115,7 @@ export const runTestsTool: ToolDefinition = {
       // Se rodou algo real (havia runner configurado), não tenta demais
       // Heurística: saída contém contagem de testes → os testes RODARAM (falha real)
       const ranTests = /tests\s+\d|pass\s+\d|fail\s+\d|✔|✖/.test(res.stdout + res.stderr)
-      if (ranTests || cmd === 'npm test' || custom) break
+      if (ranTests || cmd === candidates[candidates.length - 1] || custom) break
     }
 
     await emitEvent({
@@ -133,4 +132,28 @@ export const runTestsTool: ToolDefinition = {
       data: { command: custom ?? candidates.join(' | ') },
     }
   },
+}
+
+/** Detecta os candidatos de teste SEM spawns: package.json primeiro. */
+async function detectTestCandidates(workspaceRoot: string): Promise<string[]> {
+  // 1) package.json → script test (npm test)
+  try {
+    const pkgRaw = await fs.readFile(path.join(workspaceRoot, 'package.json'), 'utf8')
+    const pkg = JSON.parse(pkgRaw) as { scripts?: Record<string, string> }
+    if (pkg.scripts?.test && !pkg.scripts.test.includes('echo')) return ['npm test']
+  } catch { /* sem package.json — segue */ }
+  // 2) pasta test/ JS → node --test (auto-discovery — MÁX 2 spawns)
+  try {
+    const entries = await fs.readdir(path.join(workspaceRoot, 'test')).catch(() => [])
+    const hasJs = entries.some((e) => e.endsWith('.test.js') || e.endsWith('.test.mjs') || e.endsWith('.test.ts'))
+    if (hasJs) return ['node --test', 'npm test']
+  } catch { /* sem pasta test — segue */ }
+  // 3) projetos Python
+  try {
+    const entries = await fs.readdir(path.join(workspaceRoot, 'tests')).catch(() => [])
+    const hasPy = entries.some((e) => e.endsWith('.py'))
+    if (hasPy) return ['python3 -m unittest discover -s tests']
+  } catch { /* segue */ }
+  // 4) fallback universal (auto-discovery do Node)
+  return ['node --test']
 }

@@ -161,9 +161,12 @@ export class ModelRouter {
     }
   }
 
-  // Throttle global: intervalo mínimo entre chamadas LLM (evita 429)
+  // Throttle global: intervalo mínimo entre chamadas LLM (evita 429).
+  // FASE 2 — auditoria: 1500ms fixos custavam ~30s de espera PURA num
+  // run de 20 chamadas (medição: 1.5s × passos sem work útil). 700ms
+  // mantém proteção anti-429 com menos da metade do custo.
   private lastCallAt = 0
-  private readonly minIntervalMs = 1500
+  private readonly minIntervalMs = 700
 
   private async throttle(): Promise<void> {
     const now = Date.now()

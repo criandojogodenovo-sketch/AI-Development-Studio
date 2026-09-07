@@ -45,10 +45,12 @@ import {
   type TestRecordSnapshot, type CorrectionSnapshot, type ReviewSnapshot, type VerificationResult,
 } from './state-machine'
 import { classifyError, type PoskliErrorCode } from './errors'
-import { withPoskliVersion } from '../models/version-context.ts'
+import { withPoskliVersion, requestPoskliVersion } from '../models/version-context.ts'
 import { POSKLI_VERSIONS } from '../models/chain.ts'
 import { failureSignature, agenticFixBudget, agenticFixDecision } from './loop-guard.ts'
 import { taskText } from '../orchestrator/task-text.ts'
+import { budgetFor } from './budget.ts'
+import { buildCorrectionContext } from './correction-context.ts'
 
 // ---------- TIPOS ----------
 
@@ -120,6 +122,9 @@ interface PoskliContext {
   maxIterations: number
   evidence: string[]
   plan: Plan
+  /** FASE 2 — orçamento por NÍVEL (0.1/0.2/0.3.1/1.0-flash/superagent):
+   *  tool calls, steps, timeout e contexto de arquivos. */
+  budget: ReturnType<typeof budgetFor>
   /** Registros com identidade (nunca duplicados por re-render/polling). */
   testRecords: TestRecord[]
   corrections: CorrectionRecord[]
@@ -146,7 +151,8 @@ class QuotaExhaustedAbort extends Error {
 /** Resumo do DIFF do workspace (Tarefa C §3e): correções recebem
  *  apenas as linhas alteradas + erro resumido — nunca o código completo.
  *  CORREÇÃO: comandos SEM pipe/redirecionamento (allowlist sem shell
- *  rejeita metacaracteres — a saída é limitada pelo clipToolOutput). */
+ *  rejeita metacaracteres — a saída é limitada pelo clipToolOutput).
+ *  FASE 2 — skipSync: leitura (git diff), nunca altera arquivos. */
 async function workspaceDiffSummary(ctx: PoskliContext): Promise<string> {
   try {
     const res = await runExecution({
@@ -156,6 +162,7 @@ async function workspaceDiffSummary(ctx: PoskliContext): Promise<string> {
       source: 'poskli',
       trigger: 'diff-summary',
       timeoutMs: 15_000,
+      skipSync: true,
     })
     if (res.status !== 'SUCCESS' && res.exitCode !== 0) {
       return '(diff indisponível — workspace sem git ou comando bloqueado)'
@@ -171,7 +178,10 @@ async function workspaceDiffSummary(ctx: PoskliContext): Promise<string> {
 /** Checkpoint git agressivo (reversibilidade estilo Codex): commit do
  *  estado atual ANTES/depois de cada ação relevante — o usuário pode
  *  reverter qualquer passo do agente com git. Best-effort (workspace
- *  sem git → silencioso; nunca bloqueia o run). */
+ *  sem git → silencioso; nunca bloqueia o run).
+ *  FASE 2 — skipSync: comandos git NÃO alteram arquivos-fonte (o sync
+ *  disco→DB de cada checkpoint era 2 fetches completos do DB por
+ *  execução — puro desperdício medido). */
 async function checkpointWorkspace(ctx: PoskliContext, label: string): Promise<void> {
   try {
     await runExecution({
@@ -181,6 +191,7 @@ async function checkpointWorkspace(ctx: PoskliContext, label: string): Promise<v
       source: 'poskli',
       trigger: 'checkpoint',
       timeoutMs: 15_000,
+      skipSync: true,
     }).catch(() => null)
     const safe = label.replace(/[^\w.-]/g, '-').slice(0, 60)
     await runExecution({
@@ -190,6 +201,7 @@ async function checkpointWorkspace(ctx: PoskliContext, label: string): Promise<v
       source: 'poskli',
       trigger: 'checkpoint',
       timeoutMs: 15_000,
+      skipSync: true,
     }).catch(() => null)
     const hash = await runExecution({
       projectId: ctx.projectId,
@@ -198,6 +210,7 @@ async function checkpointWorkspace(ctx: PoskliContext, label: string): Promise<v
       source: 'poskli',
       trigger: 'checkpoint',
       timeoutMs: 10_000,
+      skipSync: true,
     }).catch(() => null)
     const h = (hash?.stdout ?? '').trim()
     if (h) ctx.evidence.push(`ponto de restauração git: ${h} (${label})`)
@@ -207,7 +220,8 @@ async function checkpointWorkspace(ctx: PoskliContext, label: string): Promise<v
 }
 
 /** Há alterações não commitadas no workspace? (detecção de loop
- *  NO_REPO_CHANGE — null quando o git não está disponível). */
+ *  NO_REPO_CHANGE — null quando o git não está disponível).
+ *  FASE 2 — skipSync: leitura de estado, nunca altera arquivos. */
 async function workspaceHasChanges(ctx: PoskliContext): Promise<boolean | null> {
   try {
     const res = await runExecution({
@@ -217,6 +231,7 @@ async function workspaceHasChanges(ctx: PoskliContext): Promise<boolean | null> 
       source: 'poskli',
       trigger: 'loop-guard',
       timeoutMs: 10_000,
+      skipSync: true,
     })
     if (res.status !== 'SUCCESS' && res.exitCode !== 0) return null
     return ((res.stdout ?? '') + (res.stderr ?? '')).trim().length > 0
@@ -351,10 +366,13 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
   const memory = await readProjectMemory(ctx.projectId)
   const root = await ensureMaterialized(ctx.projectId)
   const files = await selectRelevantFiles(root, [], ctx.request)
+  // FASE 2 — teto de contexto por NÍVEL (0.1: 8k … superagent: 16k;
+  // era 20k fixo — média medida de 4.271 tokens IN/passo)
+  const fileCap = ctx.budget.contextFileChars
   const fileBlock = files
-    .map((f) => `### ${f.path}\n\`\`\`\n${f.content.slice(0, 2200)}\n\`\`\``)
+    .map((f) => `### ${f.path}\n\`\`\`\n${f.content.slice(0, Math.min(2200, Math.floor(fileCap / 6)))}\n\`\`\``)
     .join('\n')
-    .slice(0, 20000)
+    .slice(0, fileCap)
 
   const out = await runAgent(
     {
@@ -376,8 +394,10 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
         `## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`,
         fileBlock ? `## ARQUIVOS RELEVANTES\n${fileBlock}` : '(workspace vazio ou sem arquivos relevantes)',
       ].join('\n\n'),
+      // FASE 2 — orçamento por nível aplicado ao planner
+      budget: { maxSteps: ctx.budget.maxSteps, agentTimeoutMs: ctx.budget.agentTimeoutMs },
     },
-    12
+    Math.min(12, ctx.budget.maxToolCalls)
   )
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
@@ -417,10 +437,14 @@ async function implementTask(
   const root = await ensureMaterialized(ctx.projectId)
   const memory = await readProjectMemory(ctx.projectId)
   const files = await selectRelevantFiles(root, [], task.title + ' ' + task.description)
+  // FASE 2 — teto de contexto por NÍVEL (era 16k fixo) + trechos
+  // menores por arquivo (2500 → fileCap/6): menos duplicação entre
+  // ANALYZING e IMPLEMENTING dos MESMOS arquivos.
+  const fileCap = ctx.budget.contextFileChars
   const fileBlock = files
-    .map((f) => `### ${f.path}\n\`\`\`\n${f.content.slice(0, 2500)}\n\`\`\``)
+    .map((f) => `### ${f.path}\n\`\`\`\n${f.content.slice(0, Math.min(1800, Math.floor(fileCap / 6)))}\n\`\`\``)
     .join('\n')
-    .slice(0, 16000)
+    .slice(0, fileCap)
 
   await transitionTask(task.id, 'RUNNING', { attempts: { increment: 1 }, input: { description: task.description, agentRole: task.agentRole, poskli: ctx.runId } as object })
   await emitEvent({ type: 'task.started', projectId: ctx.projectId, taskId: task.id, runId: ctx.runId, agent: agent.id, message: `Poskli — implementando: ${task.title}` })
@@ -442,8 +466,10 @@ async function implementTask(
         'Complete a tarefa com código real. Ao final, cite evidências.',
       ].filter(Boolean).join('\n'),
       contextBlock: [`## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`, fileBlock ? `## ARQUIVOS ATUAIS\n${fileBlock}` : ''].filter(Boolean).join('\n\n'),
+      // FASE 2 — orçamento por nível (steps/timeout) aplicado ao executor
+      budget: { maxSteps: ctx.budget.maxSteps, agentTimeoutMs: ctx.budget.agentTimeoutMs },
     },
-    Math.min(STUDIO_CONFIG.limits.maxToolCalls, 40)
+    Math.min(STUDIO_CONFIG.limits.maxToolCalls, ctx.budget.maxToolCalls)
   )
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
@@ -654,6 +680,10 @@ async function runPoskliInner(runId: string): Promise<void> {
     ? Math.min(STUDIO_CONFIG.limits.maxTotalExecutionMs, 270_000)
     : STUDIO_CONFIG.limits.maxTotalExecutionMs
 
+  // FASE 2 — orçamento por NÍVEL da versão ativa (ALS do run > env):
+  // limita tool calls, steps, timeout e contexto por agente.
+  const levelBudget = budgetFor(requestPoskliVersion() ?? STUDIO_CONFIG.router.poskliVersion)
+
   const ctx: PoskliContext = {
     runId,
     projectId: run.projectId,
@@ -667,6 +697,7 @@ async function runPoskliInner(runId: string): Promise<void> {
     maxIterations: run.maxIterations,
     evidence: [],
     plan: { architecture: '', stack: [], tasks: [] },
+    budget: levelBudget,
     testRecords: [],
     corrections: [],
     review: { status: 'NOT_RUN', attempts: 0 },
@@ -798,22 +829,16 @@ async function runPoskliInner(runId: string): Promise<void> {
       const record = await startCorrection(ctx, 'TEST_FAILURE')
       let repoChanged: boolean | null = null
       await stage(ctx, 'IMPLEMENTING', async () => {
-        // Tarefa C §3e: correção via DIFF + erro resumido — nunca o código completo
+        // Tarefa C §3e: correção via DIFF + erro resumido — nunca o código
+        // completo (builder PURO testável em correction-context.ts)
         const failureHints = clipToolOutput(extractFailureHints(tests.stdout, tests.stderr))
         const diff = await workspaceDiffSummary(ctx)
-        await applyCorrection(ctx, record, async () =>
-          [
-            '## FALHA DOS TESTES (resumo)',
-            `Comando: ${tests.command}`,
-            '',
-            failureHints,
-            '',
-            '## DIFF DO ESTADO ATUAL (linhas alteradas)',
-            diff,
-            '',
-            'Edite DIRETAMENTE as linhas que causam a falha: use modify_file com trechos pequenos (searchText/replaceText). NÃO reescreva arquivos inteiros nem reenvie código completo.',
-          ].join('\n')
-        )
+        const correctionCtx = buildCorrectionContext({
+          command: tests.command,
+          failureHints,
+          diff,
+        })
+        await applyCorrection(ctx, record, async () => correctionCtx)
         // LOOP-GUARD: a edição alterou o repositório?
         repoChanged = await workspaceHasChanges(ctx)
         repoChangedAfterFix = repoChanged
@@ -857,10 +882,10 @@ async function runPoskliInner(runId: string): Promise<void> {
     let previewOk = false
     let verification: VerificationResult | null = null
     await stage(ctx, 'VERIFYING', async () => {
-      if (!testPassed && Date.now() < ctx.deadline - 20_000) {
-        tests = await runTestsStage(ctx, 'FINAL')
-        testPassed = tests.passed
-      }
+      // FASE 2 — REMOVIDO o re-teste FINAL: re-executar `npm test` sem
+      // NENHUMA edição desde o último teste produzia exatamente o mesmo
+      // resultado (até 180s desperdiçados por run, medido em auditoria).
+      // O último TestRecord (INITIAL/AFTER_CORRECTION) é a verdade.
       const projectType = (await db.project.findUnique({ where: { id: ctx.projectId }, select: { type: true } }))?.type ?? 'EMPTY_PROJECT'
       // Projetos Godot: preview web NÃO se aplica (jogo nativo — a
       // validação real é godot_check/testes estruturais)
@@ -1028,7 +1053,8 @@ export async function recoverStaleRun(runId: string): Promise<void> {
     corrections: (run.corrections as unknown as CorrectionSnapshot[]) ?? [],
     verification: null,
     testsRequired: true,
-    reviewRequired: true,
+    // modo agêntico (sem revisão dedicada) — consistente com o fluxo vivo
+    reviewRequired: false,
   } satisfies DeriveFinalStatusInput)
 
   const terminal = displayFromGlobal(derivation.state)

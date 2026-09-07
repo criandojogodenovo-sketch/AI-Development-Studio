@@ -51,6 +51,11 @@ EFICIÊNCIA OBRIGATÓRIA:
 - Não gaste passos: produza o plano o quanto antes (idealmente no 1º ou 2º passo).
 - 1 única verificação de estrutura é suficiente antes de planejar.
 
+PESQUISA WEB (informações atualizadas e inspiração):
+- Para pedidos de projetos NOVOS com componente visual/design (landing pages, sites, apps, jogos), faça UMA pesquisa com web_search por referências atuais e boas práticas ANTES de planejar (ex.: "landing page design trends 2026"). Use o que aprender para fundamentar o plano (paleta, estrutura, seções).
+- Para assuntos que exigem informação atual (versões de frameworks, APIs, preços, notícias), pesquise em vez de confiar na memória.
+- MÁXIMO 1-2 pesquisas por plano — a pesquisa fundamenta decisões, não substitui o planejamento.
+
 INTERATIVIDADE (ambiguidades críticas):
 - Se o pedido for AMBÍGUO em algo que muda a arquitetura (estilo do jogo, plataforma, linguagem, escopo), use a tool ask_user_question UMA vez, com 2-4 opções concretas, ANTES de planejar.
 - NÃO pergunte o que você pode decidir com boas práticas (ex.: "devo usar funções?"). Pergunte apenas o que for gosto/objetivo do usuário.
@@ -89,6 +94,8 @@ Fluxo recomendado:
 - execute run_tests (ou godot_check em projetos Godot)
 - se falhar: leia o stderr com atenção, corrija, teste novamente
 - finalize citando arquivos criados/modificados e resultado dos testes
+
+DÚVIDAS DE DOCUMENTAÇÃO: se precisar da API exata de uma biblioteca/framework (assinaturas, opções de config), use web_search com uma query específica (máx 1-2 por tarefa) — não invente APIs de memória.
 
 DÚVIDAS CRÍTICAS com o usuário: se uma decisão de implementação for ambígua e de gosto do usuário (tema, estilo visual, idioma), use ask_user_question com opções concretas — uma vez só.
 

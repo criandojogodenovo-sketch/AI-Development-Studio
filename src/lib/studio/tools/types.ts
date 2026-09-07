@@ -4,13 +4,14 @@
 // logs (ToolCall no DB), timeout e tratamento de erro.
 // ============================================================
 
-export type ToolCategory = 'fs' | 'exec' | 'git' | 'github' | 'info' | 'user' | 'game'
+export type ToolCategory = 'fs' | 'exec' | 'git' | 'github' | 'info' | 'user' | 'game' | 'web'
 export type ToolPermission =
   | 'fs:read' | 'fs:write' | 'fs:delete'
   | 'exec:command' | 'exec:tests'
   | 'git:read' | 'git:write'
   | 'github:read' | 'github:write'
   | 'user:ask'
+  | 'web:search'
 
 export interface ToolParam {
   name: string

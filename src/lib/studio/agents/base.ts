@@ -15,7 +15,9 @@ import { toolToSchema, type ToolCtx } from '../tools/types'
 import { emitEvent } from '../events/bus'
 import { compressHistory } from '../context/context-manager'
 import { clipToolOutput } from '../context/clip.ts'
-import { shouldAutoCompact, compactConversation, agentProgressFromSteps } from '../context/compaction.ts'
+import {
+  shouldAutoCompact, compactConversation, agentProgressFromSteps, slimContextMessage,
+} from '../context/compaction.ts'
 
 /** Nome de produto do agente para mensagens de evento (server-side). */
 function agentDisplayName(agentId: string): string {
@@ -53,6 +55,9 @@ export interface AgentRunInput {
   extraMessages?: ChatMessage[]
   /** Run do Poskli (interatividade ask_user_question + cancelamento). */
   poskliRunId?: string
+  /** Orçamento por NÍVEL (FASE 2 — 0.1/0.2/0.3.1/1.0-flash/superagent):
+   *  clampa maxSteps e timeoutMs do agente. Ausente → usa a definição. */
+  budget?: { maxSteps: number; agentTimeoutMs: number }
 }
 
 export interface AgentRunOutput {
@@ -164,9 +169,20 @@ export class AgentRunner {
   private runId!: string
   private startedAt = Date.now()
   private deadline: number
+  // Teto EFETIVO de passos (menor entre agente e orçamento por nível)
+  private readonly effectiveMaxSteps: number
+  // FASE 2 — auditoria: após 3 passos, o bloco inicial de contexto
+  // (arquivos+schemas ~30k chars) é emagrecido para estado — corta
+  // a média medida de 4.271 tokens IN/passo.
+  private static readonly SLIM_AFTER_STEPS = 3
 
   constructor(private input: AgentRunInput) {
-    this.deadline = Date.now() + input.agent.timeoutMs
+    const agent = input.agent
+    this.effectiveMaxSteps = input.budget
+      ? Math.max(1, Math.min(agent.maxSteps, input.budget.maxSteps))
+      : agent.maxSteps
+    const timeout = input.budget ? Math.min(agent.timeoutMs, input.budget.agentTimeoutMs) : agent.timeoutMs
+    this.deadline = Date.now() + timeout
   }
 
   /** Executa o loop completo de um agente. */
@@ -199,6 +215,8 @@ export class AgentRunner {
     ]
 
     // Contexto: tools disponíveis (schema) + objetivo + contexto do projeto
+    // FASE 2 — schemas COMPACTOS (JSON sem pretty-print cortava ~30%:
+    // `null, 1` gastava indentação em TODA chamada)
     const available = (agent.allowedTools.includes('*')
       ? toolsForPermissions(agent.permissions)
       : agent.allowedTools.map((t) => getTool(t)).filter((t): t is NonNullable<typeof t> => Boolean(t))
@@ -211,11 +229,25 @@ export class AgentRunner {
         objective,
         contextBlock ? '\n## CONTEXTO DO PROJETO\n' + contextBlock : '',
         '\n## FERRAMENTAS DISPONÍVEIS (use exatamente estes nomes)',
-        JSON.stringify(available, null, 1).slice(0, 8000),
+        JSON.stringify(available),
       ]
         .filter(Boolean)
         .join('\n'),
     })
+
+    // FASE 2 — emagrecimento do contexto inicial: a partir do 4º
+    // passo os arquivos já foram lidos via tools; a mensagem inicial
+    // troca os blocões por OBJETIVO + estado (arquivos tocados/testes).
+    let contextSlimmed = false
+    const maybeSlimContext = () => {
+      if (contextSlimmed || this.steps.length < AgentRunner.SLIM_AFTER_STEPS) return
+      contextSlimmed = true
+      const progress = agentProgressFromSteps(this.steps)
+      messages[1] = {
+        role: 'user',
+        content: slimContextMessage(messages[1].content, progress, { keepFileList: true }),
+      }
+    }
 
     if (this.input.extraMessages?.length) messages.push(...this.input.extraMessages)
 
@@ -223,7 +255,7 @@ export class AgentRunner {
     let status: AgentRunOutput['status'] = 'COMPLETED'
 
     try {
-      while (this.steps.length < agent.maxSteps) {
+      while (this.steps.length < this.effectiveMaxSteps) {
         // ---- LIMITES Duros ----
         if (Date.now() > this.deadline) {
           status = 'TIMEOUT'
@@ -235,6 +267,8 @@ export class AgentRunner {
           finalResult = `MAX_TOOL_CALLS: orçamento de ferramentas esgotado (${this.input.toolBudget}).`
           break
         }
+        // FASE 2 — emagrece o contexto inicial quando aplicável
+        maybeSlimContext()
 
         // ---- CHAMADA AO MODELO ----
         // Histórico comprimido (economia de tokens): observações curtas
@@ -357,10 +391,12 @@ export class AgentRunner {
         this.toolCallCount++
 
         // ---- Detecção de AÇÃO repetida (loop de leitura, etc.) ----
+        // FASE 2 — apertado de 4 para 3 (2 runs reais morreram em
+        // REPEATED_ACTION com 4 repetições — parar 1 passo antes)
         const actionKey = `${toolName}:${JSON.stringify(toolArgs)}`.slice(0, 300)
         const seen = (this.actionCounts.get(actionKey) ?? 0) + 1
         this.actionCounts.set(actionKey, seen)
-        if (seen >= 4) {
+        if (seen >= 3) {
           status = 'REPEATED_FAILURE'
           finalResult =
             `REPEATED_ACTION: a mesma ação foi executada ${seen} vezes sem progresso.\n` +
@@ -448,9 +484,9 @@ export class AgentRunner {
         // ---- Economia de tokens: observação já entra via history no próximo loop ----
       }
 
-      if (this.steps.length >= agent.maxSteps && !finalResult) {
+      if (this.steps.length >= this.effectiveMaxSteps && !finalResult) {
         status = 'MAX_LIMITS_REACHED'
-        finalResult = `MAX_STEPS: agente atingiu ${agent.maxSteps} passos sem finalizar.`
+        finalResult = `MAX_STEPS: agente atingiu ${this.effectiveMaxSteps} passos sem finalizar.`
       }
     } catch (err) {
       status = 'FAILED'
@@ -522,7 +558,7 @@ function sanitizeArgs(args: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** Atalho para rodar um agente com orçamento de ferramentas. */
-export async function runAgent(input: AgentRunInput, toolBudget = 60): Promise<AgentRunOutput> {
+export async function runAgent(input: AgentRunInput, toolBudget = 40): Promise<AgentRunOutput> {
   const runner = new AgentRunner(input)
   runner.setToolBudget(toolBudget)
   return runner.run()

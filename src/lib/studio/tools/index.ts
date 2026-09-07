@@ -20,6 +20,7 @@ import {
 import { runCommandTool, runTestsTool } from './exec-tools'
 import { GODOT_TOOLS } from './game-tools'
 import { askUserQuestionTool } from './user-tools'
+import { webSearchTool } from './web-tools'
 import { GIT_TOOLS } from './git-tools'
 import { GITHUB_TOOLS } from './github-tools'
 import { validateArgs, type ToolCtx, type ToolDefinition, type ToolResult } from './types'
@@ -37,6 +38,7 @@ const ALL_TOOLS: ToolDefinition[] = [
   runTestsTool,
   ...GODOT_TOOLS,
   askUserQuestionTool,
+  webSearchTool,
   ...GIT_TOOLS,
   ...GITHUB_TOOLS,
 ]
