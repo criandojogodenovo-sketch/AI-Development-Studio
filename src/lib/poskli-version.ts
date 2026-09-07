@@ -1,26 +1,29 @@
 // ============================================================
-// POSKLI VERSION (client-side) — opções do SELETOR DE MODELOS
+// POSKLI VERSION (client-side) — MODOS do seletor
 // ============================================================
-// Fonte única das opções exibidas no Command Center (PoskliPanel) e
-// na aba Models. A escolha é persistida em localStorage e enviada ao
-// backend no corpo (`poskliVersion`) e header (`x-poskli-version`) de
-// todas as chamadas que envolvem o Poskli; o backend valida contra a
-// lista server-side (chain.ts) — a env POSKLI_VERSION continua como
-// fallback quando nada é enviado.
+// Fonte única das opções exibidas no Command Center (PoskliPanel).
+// A escolha é persistida em localStorage e enviada ao backend no
+// corpo (`poskliVersion`) e header (`x-poskli-version`) de todas
+// as chamadas que envolvem o Poskli; o backend valida contra a
+// lista server-side (chain.ts) — a env POSKLI_VERSION continua
+// como fallback quando nada é enviado.
 //
-// Tarefa C: Experiential ELIMINADA — expposkli-1.0/1.1 removidas;
-// nova versão superagent (badge violeta) com dupla de coding.
-// Valores antigos persistidos no localStorage (ex.: "expposkli-1.0")
-// são ignorados na leitura (voltam ao default da env).
+// RECONSTRUÇÃO AGÊNTICA: o usuário final vê MODOS com papéis
+// (não nomes técnicos de modelos — "níveis" 0.1/0.2/… são
+// detalhe interno; os values seguem válidos para o backend):
+//   Normal      → 0.1     Padrão      → 0.2
+//   Avançado    → 0.3.1   Superagente → superagent (badge violeta)
+// Valores antigos no localStorage (ex.: "1.0-flash", "expposkli-*")
+// são ignorados na leitura (voltam ao default do servidor).
 // ============================================================
 
 export const POSKLI_VERSION_STORAGE_KEY = 'poskli-version'
 
 export interface PoskliVersionOption {
   value: string
-  /** rótulo curto exibido no seletor */
+  /** rótulo curto exibido no seletor (nome do MODO) */
   short: string
-  /** descrição exibida na lista suspensa */
+  /** descrição exibida na lista suspensa (papéis, sem nomes técnicos) */
   detail: string
   /** descrição longa (tooltip/legenda) */
   description: string
@@ -31,47 +34,39 @@ export interface PoskliVersionOption {
 export const POSKLI_VERSION_OPTIONS: readonly PoskliVersionOption[] = [
   {
     value: '0.1',
-    short: '0.1 · legado B.AI',
-    detail: 'Qwen · Hy3 (só B.AI)',
+    short: 'Normal',
+    detail: 'leve e rápido',
     description:
-      'Versão legada — apenas B.AI: master Qwen, coding Hy3, review Qwen. Sem failover externo.',
+      'Modo leve: agente de planeamento, agente de código e agente de verificação econômicos — ideal para pedidos simples e rápidos, sem reservas externas.',
     highlight: false,
   },
   {
     value: '0.2',
-    short: '0.2 · B.AI + NVIDIA',
-    detail: 'B.AI → NVIDIA (padrão)',
+    short: 'Padrão',
+    detail: 'equilibrado (recomendado)',
     description:
-      'Master GLM, coding Qwen, review Hy3 — NVIDIA como fallback de coding/review em falhas elegíveis.',
+      'Modo padrão: planeamento forte, código ágil e verificação de qualidade — com reserva técnica automática se um dos agentes ficar indisponível.',
     highlight: false,
   },
   {
     value: '0.3.1',
-    short: '0.3.1 · review NVIDIA',
-    detail: 'Hy3 · Qwen→GLM · GPT-OSS',
+    short: 'Avançado',
+    detail: 'verificação reforçada',
     description:
-      'Master Hy3, coding Qwen (GLM imediato em 429 — mesma conta), review GPT-OSS-20B (NVIDIA) com reserva GPT-5.6 Luna.',
-    highlight: false,
-  },
-  {
-    value: '1.0-flash',
-    short: '1.0 Flash · NVIDIA',
-    detail: 'NVIDIA prioritário → B.AI',
-    description:
-      'NVIDIA prioritário: master Nemotron, coding DeepSeek V4 Flash, review GPT-OSS-20B. 429 → 1 retry → B.AI como reserva.',
+      'Modo avançado: verificação independente reforçada e plano B imediato quando um agente atinge limites de uso — para trabalho mais exigente.',
     highlight: false,
   },
   {
     value: 'superagent',
-    short: 'superagent',
-    detail: 'GLM · Hy3+Qwen · GPT-OSS',
+    short: 'Superagente',
+    detail: 'dupla de implementação',
     description:
-      'Superagente: master GLM, coding DUPLA (Hy3 → Qwen em 429 → DeepSeek NVIDIA), review GPT-OSS-20B (NVIDIA) com reserva Luna.',
+      'Superagente: dupla de implementação trabalhando em sequência com falência gradual — para pedidos difíceis que precisam de mais força.',
     highlight: true,
   },
 ] as const
 
-/** Lê a versão persistida (localStorage); null se nunca escolheu/inválida. */
+/** Lê o modo persistido (localStorage); null se nunca escolheu/inválido. */
 export function readStoredPoskliVersion(): string | null {
   if (typeof window === 'undefined') return null
   const v = (localStorage.getItem(POSKLI_VERSION_STORAGE_KEY) ?? '').trim()
@@ -79,7 +74,7 @@ export function readStoredPoskliVersion(): string | null {
   return POSKLI_VERSION_OPTIONS.some((o) => o.value === v) ? v : null
 }
 
-/** Persiste a versão escolhida (valor inválido é ignorado). */
+/** Persiste o modo escolhido (valor inválido é ignorado). */
 export function storePoskliVersion(version: string): void {
   if (typeof window === 'undefined') return
   if (!POSKLI_VERSION_OPTIONS.some((o) => o.value === version)) return

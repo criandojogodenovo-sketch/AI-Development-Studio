@@ -23,10 +23,12 @@ import { statusColor, statusLabel, formatDuration, timeAgo } from './ui-helpers'
 import {
   POSKLI_VERSION_OPTIONS, poskliVersionOption, readStoredPoskliVersion, storePoskliVersion,
 } from '@/lib/poskli-version'
+import { translateActivity } from '@/lib/poskli-activity'
 import {
   Brain, ListTodo, Hammer, FlaskConical, SearchCheck, Wrench, BadgeCheck,
   Circle, CheckCircle2, XCircle, Loader2, Square, ChevronDown, ChevronRight,
   Timer, Repeat2, Coins, FileTerminal, ShieldQuestion, Ban, CircleAlert, Cpu,
+  Activity, MessageCircleQuestion, Send,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -126,6 +128,23 @@ interface ExecutionInfo {
   durationMs: number | null; stdout?: string | null; stderr?: string | null
 }
 
+interface QuestionOptionUi { label?: string; description?: string }
+interface QuestionUi { header?: string; question?: string; options?: QuestionOptionUi[] }
+interface PendingQuestion {
+  toolCallId: string
+  questions: QuestionUi[]
+  createdAt: string
+}
+
+interface ActivityRow {
+  id: string
+  tool: string
+  status: string
+  createdAt: string
+  durationMs: number | null
+  args?: Record<string, unknown> | null
+}
+
 const STAGE_ICONS: Record<string, typeof Brain> = {
   ANALYZING: Brain,
   PLANNING: ListTodo,
@@ -187,8 +206,13 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
   const [starting, setStarting] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(true)
   const [expandedTask, setExpandedTask] = useState<string | null>(null)
-  // ---- SELETOR DE MODELOS: versão do Poskli (localStorage > default do servidor) ----
+  // ---- SELETOR DE MODELOS: modo do Poskli (localStorage > default do servidor) ----
   const [version, setVersion] = useState<string>('')
+  // ---- INTERATIVIDADE: pergunta pendente do agente + atividade ao vivo ----
+  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null)
+  const [activity, setActivity] = useState<ActivityRow[]>([])
+  const [answers, setAnswers] = useState<Record<number, string>>({})
+  const [sendingAnswer, setSendingAnswer] = useState(false)
 
   // versão inicial: escolha persistida OU default do servidor (via catálogo do GET /run)
   useEffect(() => {
@@ -237,16 +261,25 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
       const latest = d.runs[0] ?? null
       setRun(latest)
       if (latest) {
-        const detail = await api<{ run: PoskliRunInfo; tasks: TaskInfo[]; executions: ExecutionInfo[] }>(
+        const detail = await api<{
+          run: PoskliRunInfo; tasks: TaskInfo[]; executions: ExecutionInfo[]
+          pendingQuestion?: PendingQuestion | null; activity?: ActivityRow[]
+        }>(
           `/api/poskli/${latest.id}`,
           { headers: versionHeaders }
         )
         setRun(detail.run)
         setTasks(detail.tasks.filter((t) => t.status !== 'CANCELLED'))
         setExecs(detail.executions)
+        // interatividade + atividade ao vivo (traduzida na renderização)
+        const runActive = ACTIVE_STATES.includes(detail.run.state)
+        setPendingQuestion(runActive ? (detail.pendingQuestion ?? null) : null)
+        setActivity(detail.activity ?? [])
       } else {
         setTasks([])
         setExecs([])
+        setActivity([])
+        setPendingQuestion(null)
       }
     } catch {
       /* silencioso — painel secundário */
@@ -289,6 +322,34 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
       setTimeout(load, 2000)
     } catch (e) {
       toast.error((e as Error).message)
+    }
+  }
+
+  // ---- INTERATIVIDADE: responder à pergunta pendente do agente ----
+  const submitAnswer = async () => {
+    if (!run || !pendingQuestion) return
+    const filled = pendingQuestion.questions
+      .map((q, i) => ({ header: q.header, answer: (answers[i] ?? '').trim() }))
+      .filter((a) => a.answer.length > 0)
+    if (filled.length === 0) {
+      toast.error('Escolha uma opção ou escreva uma resposta')
+      return
+    }
+    setSendingAnswer(true)
+    try {
+      await api(`/api/poskli/${run.id}/answer`, {
+        method: 'POST',
+        headers: versionHeaders,
+        body: JSON.stringify({ toolCallId: pendingQuestion.toolCallId, answers: filled }),
+      })
+      toast.success('Resposta enviada — o agente retomou o trabalho')
+      setPendingQuestion(null)
+      setAnswers({})
+      setTimeout(load, 1200)
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSendingAnswer(false)
     }
   }
 
@@ -342,7 +403,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
             <Brain className="w-3.5 h-3.5 text-emerald-400" />
           </span>
           <span className="text-xs font-bold tracking-wide">POSKLI</span>
-          {/* badge da versão ativa (seletor de modelos) */}
+          {/* badge do MODO ativo (seletor — linguagem de produto) */}
           {version && (
             <Badge
               variant="outline"
@@ -353,7 +414,7 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
                   : 'bg-sky-500/10 text-sky-300 border-sky-500/30'
               }`}
             >
-              v{version}
+              {poskliVersionOption(version)?.short ?? 'Poskli'}
             </Badge>
           )}
           {run && (
@@ -455,6 +516,56 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
               <span className="flex items-center gap-1"><Coins className="w-3 h-3" />{(run.tokensIn + run.tokensOut).toLocaleString('pt-BR')} tokens</span>
               <span className="ml-auto">{timeAgo(run.startedAt)}</span>
             </div>
+
+            {/* 2.5) ATIVIDADE AO VIVO — ações do agente em linguagem de produto
+                  (substitui o foco em "loops de correção": o usuário vê o que
+                  o agente está a fazer AGORA) */}
+            {activity.length > 0 && isActive && (
+              <div className="space-y-1">
+                <p className="text-[10px] uppercase tracking-wider text-zinc-600 px-1 flex items-center gap-1">
+                  <Activity className="w-3 h-3" /> Atividade
+                </p>
+                <div className="px-2 py-1.5 rounded-lg bg-zinc-900/40 border border-zinc-800/40 space-y-0.5">
+                  {activity.slice(0, 5).map((a) => {
+                    const item = translateActivity({
+                      tool: a.tool,
+                      status: a.status,
+                      createdAt: a.createdAt,
+                      path: typeof a.args?.path === 'string' ? a.args.path : undefined,
+                    })
+                    return (
+                      <div key={a.id} className="flex items-center gap-2 text-[10.5px]">
+                        <span className="shrink-0">
+                          {item.running ? (
+                            <Loader2 className="w-3 h-3 text-violet-400 animate-spin" />
+                          ) : item.failed ? (
+                            <XCircle className="w-3 h-3 text-red-400/80" />
+                          ) : item.asked ? (
+                            <MessageCircleQuestion className="w-3 h-3 text-amber-400" />
+                          ) : (
+                            <CheckCircle2 className="w-3 h-3 text-zinc-700" />
+                          )}
+                        </span>
+                        <span
+                          className={
+                            item.asked
+                              ? 'text-amber-300'
+                              : item.failed
+                                ? 'text-red-300/80'
+                                : item.running
+                                  ? 'text-zinc-200'
+                                  : 'text-zinc-500'
+                          }
+                        >
+                          {item.label}
+                          {item.detail ? <span className="text-zinc-600 font-mono"> {item.detail}</span> : null}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* 3) ETAPAS */}
             <div className="space-y-1">
@@ -701,6 +812,70 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
           </div>
         )}
       </div>
+      {/* MODAL — pergunta do agente ao usuário (interatividade real):
+          o run PAUSA até esta resposta; sem resposta no prazo, o agente
+          prossegue com a opção mais conservadora documentada. */}
+      {pendingQuestion && isActive && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-xl border border-amber-900/50 bg-zinc-950 shadow-2xl max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center gap-2.5 p-4 border-b border-zinc-800/60">
+              <span className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-800/60 flex items-center justify-center shrink-0">
+                <MessageCircleQuestion className="w-4 h-4 text-amber-400" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-zinc-100">O agente precisa de você</p>
+                <p className="text-[10px] text-zinc-500">A execução pausou para ouvir sua decisão</p>
+              </div>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {pendingQuestion.questions.map((q, qi) => (
+                <div key={qi} className="space-y-1.5">
+                  {q.header && <p className="text-[10px] uppercase tracking-wider text-amber-500/80">{q.header}</p>}
+                  <p className="text-[12.5px] text-zinc-200 font-medium break-words">{q.question}</p>
+                  <div className="flex flex-col gap-1.5 pt-0.5">
+                    {(q.options ?? []).map((opt, oi) => {
+                      const selected = answers[qi] === opt.label
+                      return (
+                        <button
+                          key={oi}
+                          onClick={() => setAnswers((prev) => ({ ...prev, [qi]: String(opt.label ?? '') }))}
+                          className={`text-left px-3 py-2 rounded-lg border text-[11.5px] transition-colors ${
+                            selected
+                              ? 'bg-amber-500/15 border-amber-600/60 text-amber-200'
+                              : 'bg-zinc-900/60 border-zinc-800 text-zinc-300 hover:bg-zinc-900 hover:border-zinc-700'
+                          }`}
+                        >
+                          <span className="font-medium">{opt.label}</span>
+                          {opt.description && <span className="block text-[10px] text-zinc-500 mt-0.5">{opt.description}</span>}
+                        </button>
+                      )
+                    })}
+                    <input
+                      value={answers[qi] && (q.options ?? []).every((o) => o.label !== answers[qi]) ? answers[qi] : ''}
+                      onChange={(e) => setAnswers((prev) => ({ ...prev, [qi]: e.target.value.slice(0, 400) }))}
+                      placeholder="ou escreva outra resposta…"
+                      className="bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 py-2 text-[11.5px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-800/60"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-4 pt-0 flex items-center gap-2">
+              <Button
+                onClick={submitAnswer}
+                disabled={sendingAnswer || !pendingQuestion.questions.some((_, i) => (answers[i] ?? '').trim().length > 0)}
+                className="bg-amber-600 hover:bg-amber-500 h-8 flex-1"
+                size="sm"
+              >
+                {sendingAnswer ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                Enviar resposta
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
