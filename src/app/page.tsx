@@ -1,11 +1,14 @@
 'use client'
 
 // ============================================================
-// AI DEVELOPMENT STUDIO — FASE 2 — SHELL DE NAVEGAÇÃO
+// AI DEVELOPMENT STUDIO — CHAT SHELL DE NAVEGAÇÃO
+// (reconstrução conversacional — estilo Grok/ChatGPT)
 // Desktop: sidebar fixa. Mobile: hamburger + drawer.
-// Seções: Início · Projetos · Workspace · Execuções · Git ·
-//         Modelos · Ajustes · Diagnóstico
-// SEM tabs inferiores. Ícones Lucide (nunca emojis).
+// O CHAT é a interface PRIMÁRIA (primeiro item + default).
+// Seções: Chat · Início · Projetos · Execuções · Git ·
+//         Ajustes · Diagnóstico
+// SEM “Modelos” (nomes técnicos nunca aparecem na UI — o modo
+// do agente vive no seletor do Chat). SEM tabs inferiores.
 // ============================================================
 
 import { useState, useCallback } from 'react'
@@ -14,7 +17,6 @@ import { AuthView } from '@/components/studio/auth-view'
 import { DashboardView } from '@/components/studio/dashboard-view'
 import { ProjectsView } from '@/components/studio/projects-view'
 import { WorkspaceView } from '@/components/studio/workspace-view'
-import { ModelsView } from '@/components/studio/models-view'
 import { SettingsView } from '@/components/studio/settings-view'
 import { ExecutionsView } from '@/components/studio/executions-view'
 import { GitView } from '@/components/studio/git-view'
@@ -22,41 +24,46 @@ import { DiagnosticsView } from '@/components/studio/diagnostics-view'
 import { Toaster } from '@/components/ui/sonner'
 import {
   Loader2, Bot, LayoutDashboard, FolderKanban, TerminalSquare, GitBranch,
-  Cpu, Settings as SettingsIcon, Stethoscope, Menu, X, LogOut, ChevronRight,
+  Settings as SettingsIcon, Stethoscope, Menu, X, LogOut, ChevronRight, MessageCircle,
 } from 'lucide-react'
 
-type View = 'dashboard' | 'projects' | 'workspace' | 'executions' | 'git' | 'models' | 'settings' | 'diagnostics'
+type View = 'chat' | 'dashboard' | 'projects' | 'executions' | 'git' | 'settings' | 'diagnostics'
 
 const NAV_ITEMS: Array<{ id: View; label: string; icon: typeof Bot; needsProject?: boolean }> = [
+  { id: 'chat', label: 'Chat', icon: MessageCircle },
   { id: 'dashboard', label: 'Início', icon: LayoutDashboard },
   { id: 'projects', label: 'Projetos', icon: FolderKanban },
-  { id: 'workspace', label: 'Workspace', icon: Bot, needsProject: true },
   { id: 'executions', label: 'Execuções', icon: TerminalSquare, needsProject: true },
   { id: 'git', label: 'Git', icon: GitBranch, needsProject: true },
-  { id: 'models', label: 'Modelos', icon: Cpu },
   { id: 'settings', label: 'Ajustes', icon: SettingsIcon },
   { id: 'diagnostics', label: 'Diagnóstico', icon: Stethoscope },
 ]
 
 function StudioApp() {
   const { user, authChecked, activeProjectId, setActiveProject, wsConnected, projects, logout } = useStudio()
-  const [view, setView] = useState<View>('dashboard')
+  const [view, setView] = useState<View>('chat')
+  const [chatPrefill, setChatPrefill] = useState<string | null>(null)
   const [presetRequest, setPresetRequest] = useState<string | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   const navigate = useCallback((target: string) => {
-    if (target.startsWith('projects:')) {
+    if (target.startsWith('chat:')) {
+      // conversa NOVA: sugestão do painel inicial → chat limpo
+      setChatPrefill(target.slice('chat:'.length))
+      setActiveProject(null)
+      setView('chat')
+    } else if (target.startsWith('projects:')) {
       setPresetRequest(target.slice('projects:'.length))
       setView('projects')
     } else {
       setView(target as View)
     }
     setDrawerOpen(false)
-  }, [])
+  }, [setActiveProject])
 
   const openProject = useCallback((id: string) => {
     setActiveProject(id)
-    setView('workspace')
+    setView('chat')
     setDrawerOpen(false)
   }, [setActiveProject])
 
@@ -176,27 +183,23 @@ function StudioApp() {
           <span className="ml-auto text-[11px] text-zinc-500 truncate max-w-28">{currentLabel}</span>
         </header>
 
-        {/* views */}
-        <main className={`flex-1 min-h-0 ${view === 'workspace' && activeProjectId ? '' : 'mx-auto w-full max-w-6xl px-3 py-4 md:px-6 md:py-6'}`}>
+        {/* views — chat ocupa a altura total (interface primária) */}
+        <main className={`flex-1 min-h-0 ${view === 'chat' ? '' : 'mx-auto w-full max-w-6xl px-3 py-4 md:px-6 md:py-6'}`}>
+          {view === 'chat' && (
+            <WorkspaceView
+              prefill={chatPrefill}
+              onConsumePrefill={() => setChatPrefill(null)}
+              onBack={() => { navigate('projects'); setActiveProject(null) }}
+            />
+          )}
           {view === 'dashboard' && (
             <DashboardView onOpenProject={openProject} onNewProject={() => navigate('projects')} onNavigate={navigate} />
           )}
           {view === 'projects' && (
             <ProjectsView onOpenProject={openProject} presetRequest={presetRequest} />
           )}
-          {view === 'workspace' && (
-            activeProjectId ? (
-              <WorkspaceView onBack={() => { navigate('projects'); setActiveProject(null) }} />
-            ) : (
-              <div className="text-center py-16 space-y-2">
-                <Bot className="w-10 h-10 mx-auto text-zinc-700" />
-                <p className="text-zinc-500">Selecione um projeto em Projetos para abrir o Workspace.</p>
-              </div>
-            )
-          )}
           {view === 'executions' && <ExecutionsView />}
           {view === 'git' && <GitView />}
-          {view === 'models' && <ModelsView />}
           {view === 'settings' && <SettingsView />}
           {view === 'diagnostics' && <DiagnosticsView />}
         </main>

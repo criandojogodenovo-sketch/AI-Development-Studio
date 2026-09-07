@@ -211,7 +211,7 @@ const REVIEW_LABELS: Record<string, string> = {
   BLOCKED: 'bloqueada',
 }
 
-export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill?: string | null }): React.ReactElement {
+export function PoskliPanel({ projectId, prefill, embedded }: { projectId: string; prefill?: string | null; embedded?: boolean }): React.ReactElement {
   const { api } = useStudio()
   const [run, setRun] = useState<PoskliRunInfo | null>(null)
   const [tasks, setTasks] = useState<TaskInfo[]>([])
@@ -410,7 +410,10 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-zinc-950/80">
-      {/* 1) STATUS GLOBAL + comando */}
+      {/* 1) STATUS GLOBAL + comando — oculto no modo embedded
+             (o CHAT é a interface primária; este painel é só
+             DETALHE TÉCNICO opcional por trás das cortinas) */}
+      {!embedded && (
       <div className="p-3 border-b border-zinc-800/60 shrink-0 space-y-2">
         <div className="flex items-center gap-2">
           <span className="w-6 h-6 rounded-md bg-emerald-600/15 border border-emerald-800/60 flex items-center justify-center shrink-0">
@@ -502,6 +505,26 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
           </p>
         )}
       </div>
+      )}
+
+      {/* cabeçalho compacto do modo embedded: só estado + parar */}
+      {embedded && run && (
+        <div className="px-3 py-2 border-b border-zinc-800/60 flex items-center gap-2 shrink-0">
+          <Badge variant="outline" className={`${statusColor(badgeState(run))} scale-90`}>
+            {STAGE_LABELS[run.state] ?? run.state}
+          </Badge>
+          {run.errorCode && !isActive && (
+            <Badge variant="outline" className="bg-orange-500/15 text-orange-400 border-orange-500/30 scale-[0.85]">
+              {run.errorCode === 'QUOTA_EXHAUSTED' ? 'cota esgotada' : run.errorCode === 'PROVIDER_RATE_LIMIT' ? 'limite do provedor' : 'erro classificado'}
+            </Badge>
+          )}
+          {isActive && (
+            <Button size="sm" variant="outline" onClick={cancel} className="ml-auto h-6 text-[10px] border-red-900/60 text-red-400 hover:bg-red-950/40 hover:text-red-300">
+              <Square className="w-2.5 h-2.5 mr-1" /> parar
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* corpo */}
       <div className="flex-1 overflow-y-auto min-h-0">
@@ -581,11 +604,15 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
               </div>
             )}
 
-            {/* 3) ETAPAS */}
+            {/* 3) ETAPAS — apenas as que EXISTEM no run (agêntico:
+                Revisando/Corrigindo nunca aparecem em runs novos) */}
             <div className="space-y-1">
               {STAGE_ORDER.map((stage) => {
-                const Icon = STAGE_ICONS[stage] ?? Circle
                 const entries = timeline.filter((s) => s.stage === stage)
+                // estágio sem ocorrência e não ativo → oculto (não é
+                // ciclo fixo: o loop agêntico decide o próprio caminho)
+                if (entries.length === 0 && activeStage !== stage) return null
+                const Icon = STAGE_ICONS[stage] ?? Circle
                 const done = completedStages.has(stage) && !(activeStage === stage)
                 const current = activeStage === stage
                 const failed = entries.some((e) => e.state === 'FAILED')
@@ -829,10 +856,10 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
           </div>
         )}
       </div>
-      {/* MODAL — pergunta do agente ao usuário (interatividade real):
-          o run PAUSA até esta resposta; sem resposta no prazo, o agente
-          prossegue com a opção mais conservadora documentada. */}
-      {pendingQuestion && isActive && (
+      {/* MODAL — pergunta do agente ao usuário: no modo EMBEDDED
+          o modal pertence ao CHAT (interface primária); aqui não
+          duplica. */}
+      {pendingQuestion && isActive && !embedded && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
           <div className="w-full max-w-md rounded-xl border border-amber-900/50 bg-zinc-950 shadow-2xl max-h-[85vh] overflow-y-auto">
             <div className="flex items-center gap-2.5 p-4 border-b border-zinc-800/60">

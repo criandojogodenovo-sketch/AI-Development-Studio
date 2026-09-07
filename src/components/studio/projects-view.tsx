@@ -12,8 +12,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStudio } from '@/hooks/use-studio'
 import { statusColor, statusLabel, timeAgo, TEMPLATE_ICONS } from './ui-helpers'
-import { Package } from 'lucide-react'
-import { Loader2, Plus, Trash2, Play, FolderOpen } from 'lucide-react'
+import { projectNameFromMessage, type ClarifyQuestion } from '@/lib/studio/projects/intent-router'
+import { Package, MessageCircleQuestion } from 'lucide-react'
+import { Loader2, Plus, Trash2, Play, FolderOpen, ArrowLeft } from 'lucide-react'
 import { toast } from 'sonner'
 
 export function ProjectsView({ onOpenProject, presetRequest }: {
@@ -23,29 +24,42 @@ export function ProjectsView({ onOpenProject, presetRequest }: {
   const { projects, templates, api, refreshProjects } = useStudio()
   const [open, setOpen] = useState(Boolean(presetRequest))
   const [name, setName] = useState('')
-  const [type, setType] = useState('MINI_GAME')
-  const [description, setDescription] = useState('')
+  const [description, setDescription] = useState(presetRequest ?? '')
   const [approvalMode, setApprovalMode] = useState('ASSISTED')
   const [busy, setBusy] = useState(false)
+  // clarificação: o contexto era ambíguo e o agente PERGUNTOU
+  const [clarifying, setClarifying] = useState<ClarifyQuestion | null>(null)
+  const [resolvedType, setResolvedType] = useState<string | null>(null)
 
-  const suggestType = (req: string) => {
-    if (/game|jogo|sobreviv|plataforma/i.test(req)) return 'MINI_GAME'
-    if (/landing|página|site/i.test(req)) return 'LANDING_PAGE'
-    if (/api|backend/i.test(req)) return 'API'
-    return 'WEB_APP'
-  }
-
-  const create = async () => {
+  const create = async (answer?: string) => {
+    const pedido = description || presetRequest || ''
     setBusy(true)
     try {
-      const d = await api<{ project: { id: string } }>('/api/projects', {
+      const d = await api<
+        { project: { id: string; type: string } } |
+        { needsClarification: true; question: ClarifyQuestion }
+      >('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: name || 'Novo Projeto', type, description: description || presetRequest || '', approvalMode }),
+        body: JSON.stringify({
+          name: name || projectNameFromMessage(pedido) || 'Novo Projeto',
+          description: pedido,
+          approvalMode,
+          ...(resolvedType || answer ? { resolvedType: resolvedType ?? answer } : {}),
+        }),
       })
+      if ('needsClarification' in d) {
+        // SEM seletor de tipo na UI: o agente pergunta no diálogo
+        setClarifying(d.question)
+        return
+      }
       await refreshProjects()
-      toast.success('Projeto criado com template real')
+      const typeLabel = templates.find((t) => t.type === d.project.type)?.label ?? d.project.type
+      toast.success(`Projeto criado — tipo detetado automaticamente: ${typeLabel}`)
       setOpen(false)
-      setName(''); setDescription('')
+      setClarifying(null)
+      setResolvedType(null)
+      setName('')
+      setDescription('')
       onOpenProject(d.project.id)
     } catch (e) {
       toast.error((e as Error).message)
@@ -79,7 +93,9 @@ export function ProjectsView({ onOpenProject, presetRequest }: {
           <CardContent className="p-8 text-center space-y-2">
             <FolderOpen className="w-10 h-10 mx-auto text-zinc-700" />
             <p className="text-zinc-400">Nenhum projeto ainda.</p>
-            <p className="text-sm text-zinc-600">Crie um projeto — templates reais (jogo, landing, API) já vêm com código funcional e testes.</p>
+            <p className="text-sm text-zinc-600">
+              Descreva o que quer construir — o agente cria tudo automaticamente, sem escolher templates.
+            </p>
           </CardContent>
         </Card>
       )}
@@ -116,59 +132,95 @@ export function ProjectsView({ onOpenProject, presetRequest }: {
         ))}
       </div>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) { setClarifying(null); setResolvedType(null) } }}>
         <DialogContent className="bg-zinc-900 border-zinc-800 max-w-md">
-          <DialogHeader>
-            <DialogTitle>Novo projeto</DialogTitle>
-            <DialogDescription>
-              Template gera código real e testes executáveis no workspace isolado.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label>Nome</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Meu Mini Game" />
-            </div>
-            {presetRequest && (
-              <div className="rounded-md border border-emerald-800/40 bg-emerald-950/20 p-2 text-xs text-emerald-300">
-                Pedido inicial: &quot;{presetRequest}&quot; (enviado ao Master Agent ao iniciar)
+          {clarifying ? (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <MessageCircleQuestion className="w-4 h-4 text-amber-400" />
+                  O agente precisa de um detalhe
+                </DialogTitle>
+                <DialogDescription>{clarifying.question}</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5">
+                {clarifying.options.map((opt) => (
+                  <button
+                    key={opt.label}
+                    onClick={() => { setResolvedType(opt.label); void create(opt.label) }}
+                    disabled={busy}
+                    className="w-full text-left px-3 py-2.5 rounded-lg border border-zinc-800 bg-zinc-900/60 text-[12.5px] text-zinc-300 hover:border-amber-700/60 hover:text-amber-200 transition-colors disabled:opacity-50"
+                  >
+                    <span className="font-medium">{opt.label}</span>
+                    {opt.description && <span className="block text-[10.5px] text-zinc-500 mt-0.5">{opt.description}</span>}
+                  </button>
+                ))}
               </div>
-            )}
-            <div className="space-y-1.5">
-              <Label>Tipo</Label>
-              <Select value={type} onValueChange={setType}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent className="bg-zinc-900 border-zinc-800">
-                  {templates.map((t) => (
-                    <SelectItem key={t.type} value={t.type}>
-                      {(() => { const TIcon = TEMPLATE_ICONS[t.type] ?? Package; return <TIcon className="w-3.5 h-3.5 inline mr-1" /> })()} {t.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-[11px] text-zinc-600">{templates.find((t) => t.type === type)?.description}</p>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Descrição (opcional)</Label>
-              <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="O que é este projeto" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Modo de aprovação</Label>
-              <Select value={approvalMode} onValueChange={setApprovalMode}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent className="bg-zinc-900 border-zinc-800">
-                  <SelectItem value="MANUAL">MANUAL — aprovar cada ação crítica</SelectItem>
-                  <SelectItem value="ASSISTED">ASSISTED — IA trabalha, aprova críticas</SelectItem>
-                  <SelectItem value="AUTONOMOUS">AUTONOMOUS — IA trabalha dentro dos limites</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button onClick={create} disabled={busy} className="bg-emerald-600 hover:bg-emerald-500 w-full">
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Criar projeto'}
-            </Button>
-          </DialogFooter>
+              <DialogFooter>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { setClarifying(null); setResolvedType(null) }}
+                  className="text-zinc-400"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5 mr-1" /> voltar
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>Novo projeto</DialogTitle>
+                <DialogDescription>
+                  Descreva o que quer construir — o agente escolhe o template automaticamente
+                  (jogo, landing page, API…) a partir do contexto.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label>Nome (opcional)</Label>
+                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Deixe vazio — derivo do pedido" />
+                </div>
+                {presetRequest && (
+                  <div className="rounded-md border border-emerald-800/40 bg-emerald-950/20 p-2 text-xs text-emerald-300">
+                    Pedido inicial: &quot;{presetRequest}&quot;
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label>O que você quer construir?</Label>
+                  <Textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    rows={3}
+                    placeholder="ex: um jogo de naves para celular, uma landing page para a minha loja…"
+                  />
+                  <p className="text-[11px] text-zinc-600">
+                    Contexto ambíguo? O agente pergunta antes de criar — sem seletores manuais.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Modo de aprovação</Label>
+                  <Select value={approvalMode} onValueChange={setApprovalMode}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent className="bg-zinc-900 border-zinc-800">
+                      <SelectItem value="MANUAL">MANUAL — aprovar cada ação crítica</SelectItem>
+                      <SelectItem value="ASSISTED">ASSISTED — IA trabalha, aprova críticas</SelectItem>
+                      <SelectItem value="AUTONOMOUS">AUTONOMOUS — IA trabalha dentro dos limites</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  onClick={() => { void create() }}
+                  disabled={busy || (description.trim().length < 5 && !presetRequest)}
+                  className="bg-emerald-600 hover:bg-emerald-500 w-full"
+                >
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Criar projeto'}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

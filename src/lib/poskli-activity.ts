@@ -12,6 +12,10 @@ export interface ActivityEntry {
   status: string
   createdAt: string
   path?: string
+  /** comando executado (run_command/run_tests) — detalhe amigável */
+  command?: string
+  /** termo buscado (search_code) — detalhe amigável */
+  query?: string
 }
 
 export interface ActivityItem {
@@ -28,6 +32,12 @@ function filePathOf(entry: ActivityEntry): string | undefined {
   const p = entry.path
   if (typeof p !== 'string' || !p) return undefined
   return p.length > 48 ? p.slice(0, 45) + '…' : p
+}
+
+function commandOf(entry: ActivityEntry): string | undefined {
+  const c = entry.command
+  if (typeof c !== 'string' || !c) return undefined
+  return c.length > 48 ? c.slice(0, 45) + '…' : c
 }
 
 /** Traduz uma ação de ferramenta para linguagem de produto. */
@@ -47,21 +57,27 @@ export function translateActivity(entry: ActivityEntry): ActivityItem {
       case 'create_directory':
         return { label: 'A criar pasta…', detail: path }
       case 'run_tests':
-        return { label: 'A executar testes…' }
+        return { label: 'A executar testes…', detail: commandOf(entry) }
       case 'run_command':
-        return { label: 'A executar comando…' }
+        return { label: 'A executar comando…', detail: commandOf(entry) }
       case 'read_file':
-        return { label: 'A ler código…', detail: path }
+        return { label: 'A ler arquivo…', detail: path }
       case 'search_code':
-        return { label: 'A procurar no código…' }
+        return { label: 'A procurar no código…', detail: entry.query }
       case 'list_files':
         return { label: 'A inspecionar o projeto…' }
       case 'get_project_status':
         return { label: 'A analisar o estado…' }
       case 'godot_check':
         return { label: 'A validar o jogo (Godot)…' }
+      case 'web_search':
+        return { label: 'A pesquisar na web…' }
+      case 'generate_image':
+        return { label: 'A gerar imagens…' }
       case 'ask_user_question':
-        return { label: 'Aguardando sua resposta…' }
+        return pending
+          ? { label: 'Aguardando sua resposta…' }
+          : { label: 'Pergunta respondida' }
       case 'git_commit':
         return { label: 'A criar ponto de restauração…' }
       case 'git_status':

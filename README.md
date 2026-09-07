@@ -121,6 +121,19 @@ Failover entre providers (ProviderChain — `src/lib/studio/models/chain.ts`): f
 
 DeepSeek só é usado se: explicitamente habilitado + problema difícil + modelos gratuitos falharam + limite diário não atingido. O `ModelRouter` bloqueia qualquer uso acidental. O sistema funciona **completamente sem DeepSeek**.
 
+### Chat conversacional (Poskli estilo Grok/ChatGPT)
+
+A interface primária é um **CHAT CENTRAL** — o utilizador escreve mensagens e o agente trabalha "por trás das cortinas"; nada de editor, terminal, ferramentas ou nomes de modelos como interface principal:
+
+- **Interface de Chat Central** (`src/components/studio/chat/`): mensagens do utilizador (bolhas à direita) + progresso do agente como **mensagens de sistema estilizadas** (bolhas de progresso à esquerda). Terminal, código e output cru **nunca** aparecem no fluxo principal.
+- **Activity Log** (`activity-log.tsx`): histórico legível das ações — "A pensar durante Xs…", "A ler arquivo `src/index.html`…", "A executar comando `npm test`…", "A pesquisar na web…", "A gerar imagens…" — em linguagem de produto, com estado (a correr / concluído / falhou).
+- **Detalhes técnicos OCULTOS por defeito**: um botão discreto **"Ver Detalhes Técnicos"** abre um painel colapsável com Editor · Terminal · Preview · Execução (evidências do run). Editor/Explorer/Terminal nunca são a interface principal.
+- **Criação de projeto automática** (`intent-router.ts`, puro/testável): sem seletor de tipo na UI — o agente lê o contexto da mensagem ("Faz um site sobre gatos" → Landing Page; "Cria um jogo na Godot" → Jogo). Contexto ambíguo ("Cria uma app") → **pergunta no chat** ("Queres que crie uma app web, um jogo ou outra coisa?") antes de criar — nunca adivinha.
+- **Sem rótulos de estágios**: o painel principal nunca mostra "IMPLEMENTANDO/REVISANDO/CORRIGINDO/VERIFICANDO" — o progresso é conversa natural ("A analisar o pedido…", "A escrever código…", "A executar testes…"); se algo falha, o agente volta a tentar sozinho ou pergunta ao utilizador.
+- **Quota 429 honesta**: rate limit para o agente e mostra a mensagem do produto — "A cota do modelo acabou. A mudar para o modelo reserva…" — sem loops infinitos.
+- **`/api/chat`** (POST): aceita a mensagem do chat → cria o projeto automaticamente quando necessário → inicia o run (202 + `runId`); mensagem ambígua → `needsClarification` + pergunta. **GET `?project=`**: histórico da conversa (pedidos + respostas finais). **GET `?run=`**: **stream SSE** de progresso em tempo real — eventos `state` · `thinking` · `activity` · `question` (modal) · `quota` · `result` · `done` (o run executa via `after()` e sobrevive a desconexões; o cliente tem fallback automático para polling com os mesmos eventos).
+- **Zero nomes de modelos na UI**: apenas o **modo do agente** (Normal · Padrão · Avançado · Superagente) no seletor do chat. A view "Modelos" foi removida da navegação.
+
 ### Banco de dados — Neon PostgreSQL
 
 - Prisma `provider = "postgresql"`, connection string **exclusivamente** via `DATABASE_URL` (env);

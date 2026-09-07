@@ -24,21 +24,37 @@ test('A1 — ações das tools viram frases amigáveis de progresso', () => {
     ['modify_file', 'A editar arquivo…'],
     ['run_tests', 'A executar testes…'],
     ['run_command', 'A executar comando…'],
-    ['read_file', 'A ler código…'],
+    ['read_file', 'A ler arquivo…'],
     ['godot_check', 'A validar o jogo (Godot)…'],
-    ['ask_user_question', 'Aguardando sua resposta…'],
+    ['ask_user_question', 'Pergunta respondida'],
     ['git_commit', 'A criar ponto de restauração…'],
+    ['web_search', 'A pesquisar na web…'],
+    ['generate_image', 'A gerar imagens…'],
   ]
   for (const [tool, expected] of cases) {
     const item = translateActivity({ tool, status: 'OK', createdAt: new Date().toISOString() })
     assert.equal(item.label, expected, `${tool} → ${expected}`)
   }
+  // pergunta PENDENTE aguarda resposta (modal aberto)
+  const waiting = translateActivity({ tool: 'ask_user_question', status: 'PENDING', createdAt: '' })
+  assert.equal(waiting.label, 'Aguardando sua resposta…')
   // caminho do arquivo aparece como detalhe
   const withPath = translateActivity({ tool: 'create_file', status: 'OK', createdAt: '', path: 'src/main.js' })
   assert.equal(withPath.detail, 'src/main.js')
   // caminho longo é cortado
   const longPath = translateActivity({ tool: 'modify_file', status: 'OK', createdAt: '', path: 'a'.repeat(80) })
   assert.ok((longPath.detail ?? '').length <= 48)
+  // comando aparece como detalhe (Activity Log do chat)
+  const withCmd = translateActivity({ tool: 'run_command', status: 'OK', createdAt: '', command: 'npm test' })
+  assert.equal(withCmd.detail, 'npm test')
+  const withTestCmd = translateActivity({ tool: 'run_tests', status: 'OK', createdAt: '', command: 'node --test test/' })
+  assert.equal(withTestCmd.detail, 'node --test test/')
+  // comando longo é cortado
+  const longCmd = translateActivity({ tool: 'run_command', status: 'OK', createdAt: '', command: 'npx '.repeat(30) })
+  assert.ok((longCmd.detail ?? '').length <= 48)
+  // termo de busca aparece como detalhe
+  const withQuery = translateActivity({ tool: 'search_code', status: 'OK', createdAt: '', query: 'gameOver' })
+  assert.equal(withQuery.detail, 'gameOver')
 })
 
 test('A2 — NENHUM label/detalhe expõe nomes técnicos de modelos', () => {
@@ -47,6 +63,7 @@ test('A2 — NENHUM label/detalhe expõe nomes técnicos de modelos', () => {
     'read_file', 'search_code', 'list_files', 'get_project_status', 'godot_check',
     'ask_user_question', 'git_commit', 'git_status', 'git_diff', 'git_log',
     'git_create_branch', 'git_push', 'github_create_branch', 'create_pull_request',
+    'web_search', 'generate_image',
     'ferramenta_desconhecida',
   ]
   for (const tool of tools) {

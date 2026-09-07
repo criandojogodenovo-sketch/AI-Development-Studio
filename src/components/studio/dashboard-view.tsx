@@ -72,10 +72,11 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
             'Cria um mini-game 2D de sobrevivência para celular.',
             'Cria uma landing page para minha empresa.',
             'Cria uma API REST de tarefas.',
+            'Faz um site sobre gatos.',
           ].map((s) => (
             <button
               key={s}
-              onClick={() => onNavigate('projects:' + s)}
+              onClick={() => onNavigate('chat:' + s)}
               className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-left text-sm text-zinc-300 hover:border-emerald-600/50 hover:text-emerald-300 transition-colors"
             >
               <span>{s}</span>
@@ -83,7 +84,7 @@ export function DashboardView({ onOpenProject, onNewProject, onNavigate }: {
             </button>
           ))}
           <Button size="sm" variant="outline" onClick={onNewProject} className="mt-1 border-emerald-700/50 text-emerald-400 hover:bg-emerald-950">
-            Novo projeto do zero
+            Criar manualmente (com template)
           </Button>
         </CardContent>
       </Card>

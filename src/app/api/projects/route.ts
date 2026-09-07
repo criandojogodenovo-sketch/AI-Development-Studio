@@ -4,6 +4,7 @@ import { getSessionUser } from '@/lib/studio/security/auth'
 import { rateLimitApi, clientIp } from '@/lib/studio/security/rate-limit'
 import { createWorkspace, newProjectId, deleteWorkspace } from '@/lib/studio/projects/workspace'
 import { TEMPLATES, templateSummaries } from '@/lib/studio/projects/templates'
+import { classifyIntent, clarifyQuestion, resolveTypeFromAnswer } from '@/lib/studio/projects/intent-router'
 import { emitEvent } from '@/lib/studio/events/bus'
 import { projectProgress } from '@/lib/studio/orchestrator/task-graph'
 
@@ -42,7 +43,15 @@ export async function GET(req: Request) {
   return NextResponse.json({ projects: withProgress, templates: templateSummaries() })
 }
 
-/** POST /api/projects — cria projeto com template real. */
+/** POST /api/projects — cria projeto com template real.
+ *
+ * RECONSTRUÇÃO CONVERSACIONAL: o `type` é OPCIONAL — sem seletor
+ * na UI, o backend lê o contexto (nome + descrição/pedido):
+ *   - type explícito (válido) → usa-o (compatibilidade);
+ *   - sem type → classifica; contexto ambíguo → devolve uma
+ *     PERGUNTA (needsClarification) para o diálogo decidir;
+ *   - resolvedType na 2ª chamada → tipo escolhido pelo usuário.
+ */
 export async function POST(req: Request) {
   const user = await getSessionUser(req)
   if (!user) return NextResponse.json({ error: 'NÃO_AUTENTICADO' }, { status: 401 })
@@ -52,11 +61,28 @@ export async function POST(req: Request) {
 
   const body = await req.json().catch(() => ({}))
   const name = String(body.name ?? '').trim()
-  const type = String(body.type ?? 'EMPTY_PROJECT')
+  const rawType = String(body.type ?? '').trim()
   const description = String(body.description ?? '').trim()
 
   if (name.length < 2) return NextResponse.json({ error: 'NOME_INVÁLIDO (mín 2)' }, { status: 400 })
-  if (!TEMPLATES[type]) return NextResponse.json({ error: 'TEMPLATE_INVÁLIDO' }, { status: 400 })
+
+  // ---- tipo: explícito OU detetado do contexto OU pergunta ----
+  let type: string
+  if (rawType && TEMPLATES[rawType]) {
+    type = rawType
+  } else {
+    const resolvedRaw = String(body.resolvedType ?? '').trim()
+    const intent = resolvedRaw
+      ? (TEMPLATES[resolvedRaw]
+          ? { type: resolvedRaw, confident: true, matched: 'resposta do usuário' }
+          : resolveTypeFromAnswer(resolvedRaw))
+      : classifyIntent(`${name} ${description}`)
+    if (!intent.confident) {
+      // ambíguo → pergunta ANTES de criar (nunca adivinha)
+      return NextResponse.json({ needsClarification: true, question: clarifyQuestion() })
+    }
+    type = TEMPLATES[intent.type] ? intent.type : 'WEB_APP'
+  }
 
   const projectId = newProjectId()
   try {
