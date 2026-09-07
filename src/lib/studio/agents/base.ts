@@ -9,11 +9,13 @@
 
 import { db } from '@/lib/db'
 import { modelRouter } from '../models/router'
+import { STUDIO_CONFIG } from '../config'
 import { runTool, getTool, toolsForPermissions } from '../tools'
 import { toolToSchema, type ToolCtx } from '../tools/types'
 import { emitEvent } from '../events/bus'
 import { compressHistory } from '../context/context-manager'
 import { clipToolOutput } from '../context/clip.ts'
+import { shouldAutoCompact, compactConversation, agentProgressFromSteps } from '../context/compaction.ts'
 
 /** Nome de produto do agente para mensagens de evento (server-side). */
 function agentDisplayName(agentId: string): string {
@@ -49,6 +51,8 @@ export interface AgentRunInput {
   objective: string          // instrução principal
   contextBlock?: string      // arquivos relevantes, memória, etc.
   extraMessages?: ChatMessage[]
+  /** Run do Poskli (interatividade ask_user_question + cancelamento). */
+  poskliRunId?: string
 }
 
 export interface AgentRunOutput {
@@ -253,6 +257,20 @@ export class AgentRunner {
             content: '[SISTEMA] Lembrete: responda SOMENTE com JSON no protocolo: {"thought":"...","action":{"tool":"nome","args":{...}}} ou {"final":true,"result":"..."}',
           })
         }
+        // ---- COMPACTAÇÃO AUTOMÁTICA (75% da janela) — preserva ESTADO ----
+        // Como Claude Code/Codex: o resumo antigo é substituído pelo estado
+        // estruturado (arquivos tocados, testes, progresso) para o agente
+        // NUNCA repetir trabalho já concluído após a compactação.
+        if (shouldAutoCompact(conversation, STUDIO_CONFIG.context.windowTokens, STUDIO_CONFIG.context.compactAtRatio)) {
+          const progress = agentProgressFromSteps(this.steps)
+          const compacted = compactConversation(conversation, {
+            keepLastTurns: STUDIO_CONFIG.context.compactKeepLastTurns,
+            progress,
+            pendingHint: `Última ferramenta: ${progress.lastTool ?? '—'}.`,
+          })
+          conversation.length = 0
+          conversation.push(...compacted)
+        }
 
         const completion = await modelRouter.chatRole(agent.modelRole, conversation, {
           temperature: agent.role === 'coding' ? 0.2 : 0.4,
@@ -375,6 +393,7 @@ export class AgentRunner {
           runId: this.runId,
           agentId: agent.id,
           permissions: agent.permissions,
+          poskliRunId: this.input.poskliRunId,
         }
 
         let observation: string

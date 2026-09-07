@@ -35,6 +35,8 @@ const FS_WRITE_PERMS: ToolPermission[] = ['fs:read', 'fs:write']
 const EXEC_PERMS: ToolPermission[] = ['fs:read', 'exec:command', 'exec:tests']
 const GIT_READ_PERMS: ToolPermission[] = ['git:read', 'fs:read']
 const GIT_WRITE_PERMS: ToolPermission[] = ['git:read', 'git:write', 'fs:read', 'github:read', 'github:write']
+// Interatividade real: perguntar ao usuário em ambiguidades críticas
+const ASK_PERMS: ToolPermission[] = ['user:ask']
 
 export const AGENT_DEFINITIONS: AgentDefinition[] = [
   {
@@ -43,11 +45,11 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
     role: 'master',
     modelRole: 'master', // GLM-5.3-Flash
     systemPrompt: SYSTEM_PROMPTS.master,
-    allowedTools: ['list_files', 'read_file', 'search_code', 'get_project_status'],
+    allowedTools: ['list_files', 'read_file', 'search_code', 'get_project_status', 'ask_user_question'],
     maxSteps: 8,
     maxRetries: 2,
     timeoutMs: 300_000,
-    permissions: FS_READ_PERMS,
+    permissions: [...FS_READ_PERMS, ...ASK_PERMS],
     enabled: true,
     description: 'Compreende o pedido, analisa o projeto, define requisitos, escolhe arquitetura, divide o trabalho, cria o task graph e acompanha a execução. ORQUESTRA — não edita tudo diretamente.',
   },
@@ -61,11 +63,12 @@ export const AGENT_DEFINITIONS: AgentDefinition[] = [
       'list_files', 'read_file', 'search_code', 'create_file',
       'modify_file', 'delete_file', 'create_directory',
       'run_command', 'run_tests', 'git_status', 'git_diff', 'git_log',
+      'godot_check', 'ask_user_question',
     ],
     maxSteps: 22,
     maxRetries: 3,
     timeoutMs: 600_000,
-    permissions: [...FS_WRITE_PERMS, ...EXEC_PERMS, 'git:read'],
+    permissions: [...FS_WRITE_PERMS, ...EXEC_PERMS, 'git:read', ...ASK_PERMS],
     enabled: true,
     description: 'Implementa código real: cria, modifica e corrige arquivos; executa comandos e testes; itera sobre erros.',
   },

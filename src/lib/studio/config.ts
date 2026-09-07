@@ -141,6 +141,21 @@ export const STUDIO_CONFIG = {
     // chars antes de ir ao LLM (prefixo "[Output truncado - 2k chars]")
     maxToolOutputChars: num(process.env.CONTEXT_MAX_TOOL_OUTPUT_CHARS, 2000),
     maxTestOutputChars: num(process.env.CONTEXT_MAX_TEST_OUTPUT_CHARS, 2000),
+    // ---- Compactação automática (reconstrução agêntica) ----
+    // Janela de contexto estimada (tokens); ao atingir 75%, o histórico
+    // antigo é compactado PRESERVANDO estado (arquivos tocados,
+    // testes, progresso) — evita repetição de trabalho.
+    windowTokens: num(process.env.CONTEXT_WINDOW_TOKENS, 128_000),
+    compactAtRatio: num(process.env.CONTEXT_COMPACT_AT_RATIO, 0.75),
+    compactKeepLastTurns: num(process.env.CONTEXT_COMPACT_KEEP_TURNS, 6),
+  },
+
+  // ---------- AGENTIC (interatividade + honestidade) ----------
+  agentic: {
+    // Pausa máxima esperando a resposta do usuário (ask_user_question).
+    // Menor que o orçamento do run (serverless 300s) — sem resposta,
+    // o agente prossegue com a opção mais conservadora documentada.
+    userQuestionTimeoutMs: num(process.env.USER_QUESTION_TIMEOUT_MS, 120_000),
   },
 } as const
 

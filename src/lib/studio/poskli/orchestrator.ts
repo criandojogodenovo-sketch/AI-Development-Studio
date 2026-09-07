@@ -44,6 +44,7 @@ import {
 import { classifyError, rateLimitRecord, type PoskliErrorCode } from './errors'
 import { withPoskliVersion } from '../models/version-context.ts'
 import { POSKLI_VERSIONS } from '../models/chain.ts'
+import { failureSignature, shouldStopCorrectionCycle } from './loop-guard.ts'
 
 // ---------- TIPOS ----------
 
@@ -153,22 +154,84 @@ class QuotaExhaustedAbort extends Error {
 }
 
 /** Resumo do DIFF do workspace (Tarefa C §3e): correções recebem
- *  apenas as linhas alteradas + erro resumido — nunca o código completo. */
+ *  apenas as linhas alteradas + erro resumido — nunca o código completo.
+ *  CORREÇÃO: comandos SEM pipe/redirecionamento (allowlist sem shell
+ *  rejeita metacaracteres — a saída é limitada pelo clipToolOutput). */
 async function workspaceDiffSummary(ctx: PoskliContext): Promise<string> {
   try {
     const res = await runExecution({
       projectId: ctx.projectId,
-      command: 'git diff --unified=1 HEAD 2>/dev/null | head -c 6000',
+      command: 'git diff --unified=1 HEAD',
       userId: ctx.userId,
       source: 'poskli',
       trigger: 'diff-summary',
       timeoutMs: 15_000,
     })
-    const raw = ((res.stdout ?? '') + (res.stderr ?? '')).trim()
+    if (res.status !== 'SUCCESS' && res.exitCode !== 0) {
+      return '(diff indisponível — workspace sem git ou comando bloqueado)'
+    }
+    const raw = (res.stdout ?? '').trim()
     if (!raw) return '(sem alterações não commitadas — workspace limpo)'
     return clipToolOutput(raw)
   } catch {
     return '(diff indisponível — workspace sem git ou comando bloqueado)'
+  }
+}
+
+/** Checkpoint git agressivo (reversibilidade estilo Codex): commit do
+ *  estado atual ANTES/depois de cada ação relevante — o usuário pode
+ *  reverter qualquer passo do agente com git. Best-effort (workspace
+ *  sem git → silencioso; nunca bloqueia o run). */
+async function checkpointWorkspace(ctx: PoskliContext, label: string): Promise<void> {
+  try {
+    await runExecution({
+      projectId: ctx.projectId,
+      command: 'git add -A',
+      userId: ctx.userId,
+      source: 'poskli',
+      trigger: 'checkpoint',
+      timeoutMs: 15_000,
+    }).catch(() => null)
+    const safe = label.replace(/[^\w.-]/g, '-').slice(0, 60)
+    await runExecution({
+      projectId: ctx.projectId,
+      command: `git commit -m poskli-${safe}`,
+      userId: ctx.userId,
+      source: 'poskli',
+      trigger: 'checkpoint',
+      timeoutMs: 15_000,
+    }).catch(() => null)
+    const hash = await runExecution({
+      projectId: ctx.projectId,
+      command: 'git rev-parse --short HEAD',
+      userId: ctx.userId,
+      source: 'poskli',
+      trigger: 'checkpoint',
+      timeoutMs: 10_000,
+    }).catch(() => null)
+    const h = (hash?.stdout ?? '').trim()
+    if (h) ctx.evidence.push(`ponto de restauração git: ${h} (${label})`)
+  } catch {
+    /* workspace sem git — checkpoint best-effort */
+  }
+}
+
+/** Há alterações não commitadas no workspace? (detecção de loop
+ *  NO_REPO_CHANGE — null quando o git não está disponível). */
+async function workspaceHasChanges(ctx: PoskliContext): Promise<boolean | null> {
+  try {
+    const res = await runExecution({
+      projectId: ctx.projectId,
+      command: 'git status --porcelain',
+      userId: ctx.userId,
+      source: 'poskli',
+      trigger: 'loop-guard',
+      timeoutMs: 10_000,
+    })
+    if (res.status !== 'SUCCESS' && res.exitCode !== 0) return null
+    return ((res.stdout ?? '') + (res.stderr ?? '')).trim().length > 0
+  } catch {
+    return null
   }
 }
 
@@ -309,6 +372,7 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
       projectId: ctx.projectId,
       workspaceRoot: root,
       runType: 'PLAN',
+      poskliRunId: ctx.runId,
       objective: [
         `Pedido do usuário: "${ctx.request}"`,
         '',
@@ -370,6 +434,7 @@ async function implementTask(
       workspaceRoot: root,
       taskId: task.id,
       runType: task.agentRole === 'review' ? 'REVIEW' : task.agentRole === 'testing' ? 'TEST' : 'TASK',
+      poskliRunId: ctx.runId,
       objective: [
         `TAREFA: ${task.title}`,
         '',
@@ -454,6 +519,7 @@ async function reviewStage(ctx: PoskliContext): Promise<ReviewResult> {
         projectId: ctx.projectId,
         workspaceRoot: root,
         runType: 'REVIEW',
+        poskliRunId: ctx.runId,
         objective: [
           `Revise a implementação do pedido: "${ctx.request.slice(0, 300)}"`,
           '',
@@ -812,6 +878,8 @@ async function runPoskliInner(runId: string): Promise<void> {
           await transitionTask(fresh.id, 'COMPLETED', { result: { output: exec.result.slice(0, 3000) } as object, error: null })
           completed++
           ctx.evidence.push(`✔ ${fresh.title}: ${exec.result.slice(0, 140)}`)
+          // checkpoint git por ação (reversível — estilo Codex)
+          await checkpointWorkspace(ctx, `task-${completed}`)
         } else {
           const classified = classifyError(exec.result)
           if (classified.code === 'QUOTA_EXHAUSTED') {
@@ -852,12 +920,35 @@ async function runPoskliInner(runId: string): Promise<void> {
     let testPassed = tests.passed
 
     // 5) CORRECTING ← TESTING — loop limitado por maxCycles (Tarefa C
-    // §3f: 1 ciclo p/ simples, 2 p/ difíceis) + orçamento de tempo
+    // §3f: 1 ciclo p/ simples, 2 p/ difíceis) + orçamento de tempo +
+    // LOOP-GUARD de plano (reconstrução agêntica): para honestamente
+    // quando as correções não estão resolvendo (mesma assinatura de
+    // falha) ou quando não produzem mudanças no repositório.
+    const failureSignatures: string[] = []
+    if (!tests.passed) failureSignatures.push(failureSignature(tests.stdout, tests.stderr))
     const cycleBudget = Math.min(ctx.maxIterations, ctx.maxCycles)
     while (!testPassed && ctx.iteration < cycleBudget && Date.now() < ctx.deadline - 15_000) {
+      // ---- LOOP-GUARD: mesma falha persistindo após correção anterior? ----
+      const guard = shouldStopCorrectionCycle({
+        sameSignatures: failureSignatures,
+        repoChangedAfterCorrection: null,
+      })
+      if (guard.stop) {
+        ctx.evidence.push(guard.message)
+        await emitEvent({
+          type: 'correction.stopped',
+          projectId: ctx.projectId,
+          runId: ctx.runId,
+          status: 'BLOCKED',
+          message: 'Loop detectado — ciclos de correção interrompidos para poupar tokens',
+          data: { reason: guard.reason },
+        })
+        break
+      }
       ctx.iteration++
       if (!(await setState(ctx, 'CORRECTING'))) return
       const record = await startCorrection(ctx, 'TEST_FAILURE')
+      let repoChanged: boolean | null = null
       await stage(ctx, 'CORRECTING', async () => {
         // Tarefa C §3e: correção via DIFF + erro resumido — nunca o código completo
         const failureHints = clipToolOutput(extractFailureHints(tests.stdout, tests.stderr))
@@ -875,14 +966,34 @@ async function runPoskliInner(runId: string): Promise<void> {
             'Corrija APENAS as linhas que causam a falha: use modify_file com trechos pequenos (searchText/replaceText). NÃO reescreva arquivos inteiros nem reenvie código completo.',
           ].join('\n')
         )
+        // LOOP-GUARD: a correção alterou o repositório?
+        repoChanged = await workspaceHasChanges(ctx)
         const rec = ctx.corrections.find((c) => c.id === record.id)
+        // checkpoint da correção aplicada (reversível)
+        if (rec?.state === 'COMPLETED') await checkpointWorkspace(ctx, `fix-${record.attempt}`)
         return rec ? `Correção #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`
       })
       await db.poskliRun.update({ where: { id: runId }, data: { iteration: ctx.iteration } }).catch(() => {})
 
+      // LOOP-GUARD: correção sem mudanças no repo → parar honestamente
+      if (repoChanged === false) {
+        const guard = shouldStopCorrectionCycle({ sameSignatures: [], repoChangedAfterCorrection: false })
+        ctx.evidence.push(guard.message)
+        await emitEvent({
+          type: 'correction.stopped',
+          projectId: ctx.projectId,
+          runId: ctx.runId,
+          status: 'BLOCKED',
+          message: 'Loop detectado: a correção não alterou nenhum arquivo — ciclos interrompidos',
+          data: { reason: guard.reason, correctionId: record.id },
+        })
+        break
+      }
+
       if (!(await setState(ctx, 'TESTING'))) return
       tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'AFTER_CORRECTION'))
       testPassed = tests.passed
+      if (!testPassed) failureSignatures.push(failureSignature(tests.stdout, tests.stderr))
     }
 
     // 6) REVIEWING — Revisor de Qualidade (classifica rate limit; nunca mascara)
@@ -914,6 +1025,7 @@ async function runPoskliInner(runId: string): Promise<void> {
             ].join('\n')
           )
           const rec = ctx.corrections.find((c) => c.id === record.id)
+          if (rec?.state === 'COMPLETED') await checkpointWorkspace(ctx, `review-fix-${record.attempt}`)
           return rec ? `Correção pós-revisão #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`
         })
         if (await setState(ctx, 'TESTING')) {
@@ -922,6 +1034,9 @@ async function runPoskliInner(runId: string): Promise<void> {
         }
       }
     }
+
+    // checkpoint final antes da verificação (estado completo é reversível)
+    await checkpointWorkspace(ctx, 'final')
 
     // 7) VERIFYING — checklist determinístico (preview + build + artefatos)
     if (!(await setState(ctx, 'VERIFYING'))) return
@@ -933,7 +1048,10 @@ async function runPoskliInner(runId: string): Promise<void> {
         testPassed = tests.passed
       }
       const projectType = (await db.project.findUnique({ where: { id: ctx.projectId }, select: { type: true } }))?.type ?? 'EMPTY_PROJECT'
-      const previewRequired = projectType !== 'API' && projectType !== 'EMPTY_PROJECT'
+      // Projetos Godot: preview web NÃO se aplica (jogo nativo — a
+      // validação real é godot_check/testes estruturais)
+      const godotProject = await workspaceProvider.readFile(ctx.projectId, 'project.godot').then((f) => Boolean(f)).catch(() => false)
+      const previewRequired = projectType !== 'API' && projectType !== 'EMPTY_PROJECT' && !godotProject
       previewOk = previewRequired ? await verifyPreview(ctx) : true
       const buildCommand = await buildCommandFor(ctx.projectId)
       let buildOk: boolean | null = null
