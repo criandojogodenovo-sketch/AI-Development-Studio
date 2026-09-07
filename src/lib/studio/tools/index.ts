@@ -18,6 +18,8 @@ import {
   getProjectStatusTool,
 } from './fs-tools'
 import { runCommandTool, runTestsTool } from './exec-tools'
+import { GODOT_TOOLS } from './game-tools'
+import { askUserQuestionTool } from './user-tools'
 import { GIT_TOOLS } from './git-tools'
 import { GITHUB_TOOLS } from './github-tools'
 import { validateArgs, type ToolCtx, type ToolDefinition, type ToolResult } from './types'
@@ -33,6 +35,8 @@ const ALL_TOOLS: ToolDefinition[] = [
   getProjectStatusTool,
   runCommandTool,
   runTestsTool,
+  ...GODOT_TOOLS,
+  askUserQuestionTool,
   ...GIT_TOOLS,
   ...GITHUB_TOOLS,
 ]
