@@ -24,6 +24,8 @@ const COMMAND_ALLOWLIST: Record<string, string[]> = {
   grep: ['-r', '-i', '--include', '-n', '-E'],
   rg: ['--files', '-n', '-i', '-g'],
   rm: ['-rf', '-r', '-f', 'node_modules', 'dist', '.next', '.cache', 'coverage', 'tmp'],
+  // Godot 4 headless — validação real de projetos de jogo (godot_check)
+  godot: ['--version', '--headless', '--path', '--check-only', '--quit-after', '--import', '-e', '--script'],
 }
 
 /** Comandos explicitamente proibidos mesmo que prefixados. */
