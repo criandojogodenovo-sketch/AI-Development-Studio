@@ -28,7 +28,7 @@ import {
 } from '@/lib/poskli-version'
 import {
   friendlyRunState, isThinkingState, isChatTerminal, isQuotaErrorCode,
-  safeRunResult, activityToChatEvent,
+  safeRunResult, activityToChatEvent, thinkingStallDecision,
   type ChatStreamEvent, type ChatActivityEvent, type ChatQuestionEvent,
 } from '@/lib/poskli-chat'
 import type { ClarifyQuestion } from '@/lib/studio/projects/intent-router'
@@ -106,6 +106,7 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
   const [liveUserMessage, setLiveUserMessage] = useState<string | null>(null)
   const [liveState, setLiveState] = useState<{ state: string; label: string } | null>(null)
   const [thinkingSecs, setThinkingSecs] = useState(0)
+  const [thinkingNote, setThinkingNote] = useState<string | undefined>(undefined)
   const [activity, setActivity] = useState<ChatActivityEvent[]>([])
   const [liveResult, setLiveResult] = useState<string | null>(null)
   const [liveQuota, setLiveQuota] = useState(false)
@@ -150,6 +151,7 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
     setLiveUserMessage(null)
     setLiveState(null)
     setThinkingSecs(0)
+    setThinkingNote(undefined)
     setActivity([])
     setLiveResult(null)
     setLiveQuota(false)
@@ -220,6 +222,7 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
         break
       case 'thinking':
         setThinkingSecs(ev.seconds)
+        setThinkingNote(ev.note)
         break
       case 'activity':
         setActivity((prev) => {
@@ -261,7 +264,15 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
         handleEvent({ type: 'state', state: d.run.state, label: friendlyRunState(d.run.state) })
         if (isThinkingState(d.run.state)) {
           const seconds = Math.max(1, Math.round((Date.now() - new Date(d.run.startedAt).getTime()) / 1000))
-          handleEvent({ type: 'thinking', seconds })
+          // guarda de travamento no fallback (mesma lógica do SSE)
+          const lastRow = [...(d.activity ?? [])].pop()
+          const stall = thinkingStallDecision({
+            state: d.run.state,
+            startedAtMs: new Date(d.run.startedAt).getTime(),
+            lastToolAtMs: lastRow ? new Date(lastRow.createdAt).getTime() : null,
+            nowMs: Date.now(),
+          })
+          handleEvent({ type: 'thinking', seconds, ...(stall.note ? { note: stall.note } : {}) })
         }
         const rows = [...(d.activity ?? [])].reverse()
         for (const row of rows) {
@@ -566,7 +577,7 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
     if (!el) return
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
     if (nearBottom) el.scrollTop = el.scrollHeight
-  }, [activity.length, liveResult, liveState?.label, messages.length, thinkingSecs, clarify])
+  }, [activity.length, liveResult, liveState?.label, messages.length, thinkingSecs, thinkingNote, clarify])
 
   const emptyConversation = !projectId && messages.length === 0 && !liveRunId && !clarify
 
@@ -639,7 +650,9 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
           {activeRun && (
             <div className="space-y-2">
               <UserBubble text={liveUserMessage ?? ''} />
-              {liveState && isThinkingState(liveState.state) && <ThinkingBubble seconds={thinkingSecs} />}
+              {liveState && isThinkingState(liveState.state) && (
+                <ThinkingBubble seconds={thinkingSecs} note={thinkingNote} />
+              )}
               {liveState && !isThinkingState(liveState.state) && activity.length === 0 && (
                 <StatusBubble label={liveState.label} />
               )}

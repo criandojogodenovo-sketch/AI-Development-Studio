@@ -6,9 +6,10 @@
 // O CHAT É A INTERFACE PRIMÁRIA (estilo Grok/ChatGPT): o
 // utilizador escreve no centro e o agente trabalha por trás
 // das cortinas. Editor, Terminal, Explorer e Preview estão
-// OCULTOS POR DEFEITO — um botão discreto "Ver Detalhes
-// Técnicos" abre um painel colapsável para quem quiser
-// inspecionar código/terminal. NUNCA como interface principal.
+// OCULTOS POR DEFEITO — um ícone DISCRETO no canto aparece
+// SOMENTE enquanto o agente executa (run ativo); fora da
+// execução a interface fica 100% limpa (apenas chat). Quando
+// o run termina, o painel técnico fecha sozinho.
 //
 // Desktop:   [ Chat (central) | Detalhes Técnicos (opcional) ]
 // Mobile:    Chat em ecrã cheio; detalhes em overlay.
@@ -27,6 +28,7 @@ import { PreviewPanel } from './ide/preview-panel'
 import { PoskliPanel } from './poskli-panel'
 import { ChatView } from './chat/chat-view'
 import { statusColor, statusLabel } from './ui-helpers'
+import { techAccessVisible } from '@/lib/poskli-chat'
 import {
   ArrowLeft, Loader2, Eye, TerminalSquare, Code2, FileCode2, X, Wrench,
 } from 'lucide-react'
@@ -53,7 +55,22 @@ export function WorkspaceView({ prefill, onConsumePrefill, onBack }: {
   const refreshTabs = useIde((s) => s.refreshTree)
 
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null
-  const pipelineActive = activeProject?.status === 'PLANNING' || activeProject?.status === 'RUNNING'
+  // run ATIVO = agente a analisar/implementar (laboratório visível)
+  const runActive = activeProject?.status === 'PLANNING' || activeProject?.status === 'RUNNING'
+
+  // LABORATÓRIO OCULTO FORA DA EXECUÇÃO: o acesso técnico só
+  // aparece (ícone discreto no canto) durante um run ativo —
+  // ou quando já está aberto, para poder fechar. Fora disso a
+  // interface é 100% limpa: apenas chat (regra do produto).
+  const techAccess = techAccessVisible({ runActive, techOpen })
+
+  // run terminou → painel técnico fecha sozinho (interface limpa).
+  // Padrão React "adjust state during render" (sem effect — lint).
+  const [prevRunActive, setPrevRunActive] = useState(runActive)
+  if (prevRunActive !== runActive) {
+    setPrevRunActive(runActive)
+    if (!runActive) setTechOpen(false)
+  }
 
   // eventos em tempo real → editor reflete alterações do agente
   useEffect(() => {
@@ -118,33 +135,31 @@ export function WorkspaceView({ prefill, onConsumePrefill, onBack }: {
       {activeProject && (
         <Badge variant="outline" className={statusColor(activeProject.status)}>{statusLabel(activeProject.status)}</Badge>
       )}
-      {pipelineActive && (
+      {runActive && (
         <span className="flex items-center gap-1 text-[10px] text-emerald-400">
           <Loader2 className="w-3 h-3 animate-spin" />
           agente em execução
         </span>
       )}
       <div className="ml-auto flex items-center gap-1">
-        {/* botão DISCRETO — detalhes técnicos ocultos por defeito */}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setTechOpen(!techOpen)}
-          disabled={!activeProjectId}
-          title={
-            !activeProjectId
-              ? 'Disponível após o primeiro projeto'
-              : techOpen
+        {/* LABORATÓRIO — ícone DISCRETO no canto, visível SOMENTE
+            durante execução (ou aberto p/ fechar). Fora dela, some. */}
+        {techAccess && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setTechOpen(!techOpen)}
+            title={
+              techOpen
                 ? 'Ocultar código, terminal e execuções'
-                : 'Ver código, terminal e execuções (opcional)'
-          }
-          className={`h-7 text-[11px] gap-1.5 ${
-            techOpen ? 'text-zinc-300' : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-        >
-          {techOpen ? <X className="w-3.5 h-3.5" /> : <FileCode2 className="w-3.5 h-3.5" />}
-          <span className="hidden sm:inline">{techOpen ? 'Ocultar Detalhes' : 'Ver Detalhes Técnicos'}</span>
-        </Button>
+                : 'Ver código, terminal e execuções (opcional durante a execução)'
+            }
+            aria-label={techOpen ? 'Ocultar detalhes técnicos' : 'Ver detalhes técnicos'}
+            className={`h-7 w-7 ${techOpen ? 'text-zinc-300' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            {techOpen ? <X className="w-3.5 h-3.5" /> : <FileCode2 className="w-3.5 h-3.5" />}
+          </Button>
+        )}
       </div>
     </div>
   )

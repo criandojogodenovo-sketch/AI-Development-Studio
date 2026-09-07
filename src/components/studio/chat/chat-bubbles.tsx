@@ -53,18 +53,23 @@ export function AgentBubble({ markdown }: { markdown: string }) {
   )
 }
 
-/** "A pensar durante Xs…" — indicador de raciocínio. */
-export function ThinkingBubble({ seconds }: { seconds: number }) {
+/** "A pensar durante Xs…" — indicador de raciocínio. `note`
+ *  opcional: aviso honesto quando o modelo demora (>30s sem
+ *  ação) — o utilizador nunca fica sem explicação. */
+export function ThinkingBubble({ seconds, note }: { seconds: number; note?: string }) {
   return (
     <div className="flex gap-2.5">
       <AgentAvatar />
-      <div className="rounded-2xl rounded-bl-md bg-zinc-900/40 border border-zinc-800/40 px-3.5 py-2 text-[12px] text-zinc-400 flex items-center gap-2">
-        <span className="flex gap-1" aria-hidden>
-          <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
-          <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse [animation-delay:0.2s]" />
-          <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse [animation-delay:0.4s]" />
-        </span>
-        A pensar durante {seconds}s…
+      <div className="rounded-2xl rounded-bl-md bg-zinc-900/40 border border-zinc-800/40 px-3.5 py-2 text-[12px] text-zinc-400 flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <span className="flex gap-1" aria-hidden>
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse" />
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse [animation-delay:0.2s]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse [animation-delay:0.4s]" />
+          </span>
+          A pensar durante {seconds}s…
+        </div>
+        {note && <span className="text-[11px] text-amber-300/80">{note}</span>}
       </div>
     </div>
   )

@@ -14,6 +14,7 @@ import { emitEvent } from '@/lib/studio/events/bus'
 import {
   friendlyRunState, isThinkingState, isChatTerminal, isQuotaErrorCode,
   safeRunResult, activityToChatEvent, encodeSseEvent, QUOTA_EXHAUSTED_MESSAGE,
+  thinkingStallDecision,
 } from '@/lib/poskli-chat'
 
 export const dynamic = 'force-dynamic'
@@ -256,12 +257,6 @@ async function streamRunEvents(req: Request, runId: string, userId: string) {
             send(encodeSseEvent({ type: 'state', state: current.state, label: friendlyRunState(current.state) }))
           }
 
-          // ---- "A pensar durante Xs…" (análise/planamento) ----
-          if (isThinkingState(current.state)) {
-            const seconds = Math.max(1, Math.round((Date.now() - new Date(current.startedAt).getTime()) / 1000))
-            send(encodeSseEvent({ type: 'thinking', seconds }))
-          }
-
           // ---- ações do agente (atividade ao vivo) ----
           // NOTA: ToolCall.runId é o run do AGENTE — o canal correto
           // para o run Poskli é (projectId, createdAt >= startedAt)
@@ -285,6 +280,28 @@ async function streamRunEvents(req: Request, runId: string, userId: string) {
                 createdAt: row.createdAt.toISOString(),
                 ...detail,
               }),
+            }))
+          }
+
+          // ---- "A pensar durante Xs…" + guarda de travamento ----
+          // FIX: >30s de análise SEM nenhuma ação → nota honesta
+          // ("Aguardando o modelo responder…") em vez de um
+          // "A pensar…" mudo e infinito
+          if (isThinkingState(current.state)) {
+            const seconds = Math.max(1, Math.round((Date.now() - new Date(current.startedAt).getTime()) / 1000))
+            const lastToolAtMs = rows.length > 0
+              ? new Date(rows[rows.length - 1].createdAt).getTime()
+              : null
+            const stall = thinkingStallDecision({
+              state: current.state,
+              startedAtMs: new Date(current.startedAt).getTime(),
+              lastToolAtMs,
+              nowMs: Date.now(),
+            })
+            send(encodeSseEvent({
+              type: 'thinking',
+              seconds,
+              ...(stall.note ? { note: stall.note } : {}),
             }))
           }
 

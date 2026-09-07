@@ -292,9 +292,29 @@ test('C5.7 — erro bruto com "429 too many requests" na mensagem: reconhecido c
   assert.equal(eligibleForChainFailover(raw), false)
 })
 
-test('C5.8 — backoff padrão é 5s → 10s → 20s com máximo 3 tentativas', () => {
-  assert.deepEqual([...RATE_LIMIT_BACKOFF_MS], [5_000, 10_000, 20_000])
+test('C5.8 — FIX travamento: backoff padrão 2s → 5s → 10s (era 5/10/20 = 35s mudos) com máx 3 tentativas', () => {
+  assert.deepEqual([...RATE_LIMIT_BACKOFF_MS], [2_000, 5_000, 10_000])
   assert.equal(RATE_LIMIT_MAX_ATTEMPTS, 3)
+  // pior caso de espera SILENCIOSA na mesma parada: 17s (antes 35s)
+  assert.equal(RATE_LIMIT_BACKOFF_MS.reduce((a, b) => a + b, 0), 17_000)
+})
+
+test('C1.9 — FIX travamento: rota 0.2 tem MODELO RESERVA em todos os papéis (429 → 1 retry → reserva)', () => {
+  // 0.2 master: GLM → (429) Nemotron (NVIDIA) — o "modelo reserva"
+  // prometido ao utilizador; coding/review idem
+  const r = VERSION_ROUTES['0.2']
+  assert.equal(r.master.length, 2)
+  assert.equal(r.master[0].model, 'glm')
+  assert.equal(r.master[0].onRateLimit, 'retry-then-switch')
+  assert.equal(r.master[1].model, 'nemotron')
+  assert.equal(r.master[1].provider, 'nvidia')
+  assert.equal(r.coding[0].onRateLimit, 'retry-then-switch')
+  assert.equal(r.coding[1].model, 'deepseek')
+  assert.equal(r.review[0].onRateLimit, 'retry-then-switch')
+  assert.equal(r.review[1].model, 'gpt-oss')
+  // 0.1 permanece honesto: provider único, sem reserva
+  assert.equal(VERSION_ROUTES['0.1'].master.length, 1)
+  assert.equal(VERSION_ROUTES['0.1'].master[0].onRateLimit, undefined)
 })
 
 test('C5.9 — rota exaurida por 429s (switch-now em todas) → QUOTA_EXHAUSTED no fim do chain', async () => {

@@ -9,7 +9,7 @@
 //
 // Chains por versão (spec Tarefa C — Experiential ELIMINADA):
 //   0.1        : [BAI]                       Qwen/Hy3/Qwen (só B.AI)
-//   0.2        : [BAI, NVIDIA]               GLM/Qwen/Hy3 + NVIDIA (coding/review)
+//   0.2        : [BAI, NVIDIA]               GLM/Qwen/Hy3 + NVIDIA como RESERVA em 429
 //   0.3.1      : [BAI, NVIDIA]               Hy3/Qwen + review GPT-OSS-20B (NVIDIA)
 //   1.0-flash  : [NVIDIA, BAI]               NVIDIA prioritário → B.AI reserva
 //   superagent : [BAI, NVIDIA]               GLM + Hy3/Qwen (dupla coding) + GPT-OSS
@@ -113,8 +113,8 @@ export interface RouteStop {
 /**
  * Rotas por versão × papel (spec Tarefa C):
  *   0.1        : master Qwen · coding Hy3 · review Qwen (B.AI puro)
- *   0.2        : master GLM · coding Qwen→DeepSeek(NVIDIA) ·
- *                review Hy3→GPT-OSS(NVIDIA)
+ *   0.2        : master GLM→(429)Nemotron(NV) · coding
+ *                Qwen→(429)DeepSeek(NV) · review Hy3→(429)GPT-OSS(NV)
  *   0.3.1      : master Hy3 · coding Qwen→(429)GLM ·
  *                review GPT-OSS(NVIDIA)→(429)Luna(B.AI)
  *   1.0-flash  : NVIDIA prioritário (Nemotron/DeepSeek/GPT-OSS),
@@ -129,13 +129,20 @@ export const VERSION_ROUTES: Readonly<Record<PoskliVersion, Readonly<Record<Rout
     review: [{ provider: 'bai', model: 'qwen' }],
   },
   '0.2': {
-    master: [{ provider: 'bai', model: 'glm' }],
+    // FIX do travamento: GLM com reserva NVIDIA — 429 → 1 retry (2s) →
+    // Nemotron (o "modelo reserva" prometido ao utilizador no chat);
+    // coding/review idem: a reserva assume em vez de QUEIMAR 3
+    // tentativas e matar o run com QUOTA_EXHAUSTED
+    master: [
+      { provider: 'bai', model: 'glm', onRateLimit: 'retry-then-switch' },
+      { provider: 'nvidia', model: 'nemotron' },
+    ],
     coding: [
-      { provider: 'bai', model: 'qwen' },
+      { provider: 'bai', model: 'qwen', onRateLimit: 'retry-then-switch' },
       { provider: 'nvidia', model: 'deepseek' },
     ],
     review: [
-      { provider: 'bai', model: 'hy3' },
+      { provider: 'bai', model: 'hy3', onRateLimit: 'retry-then-switch' },
       { provider: 'nvidia', model: 'gpt-oss' },
     ],
   },
@@ -228,8 +235,12 @@ export function eligibleForChainFailover(err: unknown): boolean {
 
 // ---------- POLÍTICA ANTI-RATE-LIMIT (Tarefa C) ----------
 
-/** Backoff progressivo em 429: 5s → 10s → 20s. */
-export const RATE_LIMIT_BACKOFF_MS: readonly number[] = [5_000, 10_000, 20_000]
+/** Backoff progressivo em 429: 2s → 5s → 10s.
+ *  FIX do travamento "A pensar durante 45s…": o intervalo anterior
+ *  (5s/10s/20s = até 35s de espera SILENCIOSA na mesma parada)
+ *  mantinha o run "a pensar" sem qualquer ação visível. O novo
+ *  perfil corta o pior caso para 17s e mantém o freio anti-429. */
+export const RATE_LIMIT_BACKOFF_MS: readonly number[] = [2_000, 5_000, 10_000]
 
 /** Máximo de tentativas no MESMO modelo antes de QUOTA_EXHAUSTED. */
 export const RATE_LIMIT_MAX_ATTEMPTS = 3

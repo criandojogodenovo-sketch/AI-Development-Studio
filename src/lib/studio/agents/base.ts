@@ -56,8 +56,19 @@ export interface AgentRunInput {
   /** Run do Poskli (interatividade ask_user_question + cancelamento). */
   poskliRunId?: string
   /** Orçamento por NÍVEL (FASE 2 — 0.1/0.2/0.3.1/1.0-flash/superagent):
-   *  clampa maxSteps e timeoutMs do agente. Ausente → usa a definição. */
-  budget?: { maxSteps: number; agentTimeoutMs: number }
+   *  clampa maxSteps e timeoutMs do agente. Ausente → usa a definição.
+   *  DELEGAÇÃO (subagentes): maxToolCalls e tokenBudget são
+   *  orçamentos ESPECÍFICOS do subagente (coding 20/30k,
+   *  testing 5/10k, review 5/10k) — ver poskli/delegation.ts. */
+  budget?: {
+    maxSteps: number
+    agentTimeoutMs: number
+    /** teto de tool calls do subagente (menor vence com toolBudget). */
+    maxToolCalls?: number
+    /** orçamento de tokens IN+OUT do subagente — excedeu → para
+     *  honestamente com "Orçamento atingido, a terminar". */
+    tokenBudget?: number
+  }
 }
 
 export interface AgentRunOutput {
@@ -166,6 +177,10 @@ export class AgentRunner {
   private actionCounts = new Map<string, number>()
   // Cache de leituras por run: read_file repetido → observação curta
   private readCache = new Map<string, number>() // path → último step em que foi lido
+  // FIX do travamento: ferramentas BEST-EFFORT — falha/repetição
+  // NUNCA derruba o run (web_search degrada para vazio; o agente
+  // prossegue sem pesquisar em vez de ficar preso)
+  private static readonly BEST_EFFORT_TOOLS: ReadonlySet<string> = new Set(['web_search'])
   private runId!: string
   private startedAt = Date.now()
   private deadline: number
@@ -183,6 +198,10 @@ export class AgentRunner {
       : agent.maxSteps
     const timeout = input.budget ? Math.min(agent.timeoutMs, input.budget.agentTimeoutMs) : agent.timeoutMs
     this.deadline = Date.now() + timeout
+    // DELEGAÇÃO: teto de tool calls do subagente (menor vence)
+    if (input.budget?.maxToolCalls) {
+      this.toolBudget = Math.max(1, Math.min(this.toolBudget, input.budget.maxToolCalls))
+    }
   }
 
   /** Executa o loop completo de um agente. */
@@ -314,6 +333,27 @@ export class AgentRunner {
         this.tokensIn += completion.promptTokens
         this.tokensOut += completion.completionTokens
 
+        // ---- ORÇAMENTO DE TOKENS do subagente (delegação) ----
+        // Excedeu → para honestamente: "Orçamento atingido, a terminar"
+        const tokenBudget = this.input.budget?.tokenBudget
+        if (tokenBudget && this.tokensIn + this.tokensOut >= tokenBudget) {
+          status = 'MAX_LIMITS_REACHED'
+          finalResult =
+            `ORÇAMENTO_ATINGIDO: o subagente "${agent.id}" consumiu ${this.tokensIn + this.tokensOut} tokens ` +
+            `(teto ${tokenBudget}). Orçamento atingido, a terminar — reporte o estado real do que foi feito.`
+          await emitEvent({
+            type: 'agent.budget',
+            projectId,
+            taskId,
+            runId: this.runId,
+            agent: agent.id,
+            status: 'MAX_LIMITS_REACHED',
+            message: `Orçamento do subagente ${agentDisplayName(agent.id)} atingido (${tokenBudget} tokens) — a terminar`,
+            data: { tokensIn: this.tokensIn, tokensOut: this.tokensOut, tokenBudget },
+          })
+          break
+        }
+
         // ---- TRUNCAMENTO detectado (finish_reason=length) ----
         if (completion.finishReason === 'length') {
           this.steps.push({
@@ -388,15 +428,30 @@ export class AgentRunner {
           continue
         }
 
-        this.toolCallCount++
-
         // ---- Detecção de AÇÃO repetida (loop de leitura, etc.) ----
         // FASE 2 — apertado de 4 para 3 (2 runs reais morreram em
         // REPEATED_ACTION com 4 repetições — parar 1 passo antes)
+        // FIX do travamento: best-effort (web_search) NÃO mata o run.
         const actionKey = `${toolName}:${JSON.stringify(toolArgs)}`.slice(0, 300)
         const seen = (this.actionCounts.get(actionKey) ?? 0) + 1
         this.actionCounts.set(actionKey, seen)
         if (seen >= 3) {
+          if (AgentRunner.BEST_EFFORT_TOOLS.has(toolName)) {
+            // repetição de pesquisa best-effort: avisa e PROSSIGUE
+            // (o agente nunca fica preso à espera de uma pesquisa)
+            this.steps.push({
+              step: this.steps.length + 1,
+              thought: String(parsed.thought ?? '').slice(0, 300),
+              tool: String(toolName),
+              args: sanitizeArgs(toolArgs),
+              observation:
+                '[BEST_EFFORT] Esta pesquisa JÁ foi feita 2x — NÃO insista. ' +
+                'PROSSIGA com a tarefa SEM pesquisar (resultados/avisos anteriores já estão no histórico).',
+              ok: true,
+              ts: new Date().toISOString(),
+            })
+            continue
+          }
           status = 'REPEATED_FAILURE'
           finalResult =
             `REPEATED_ACTION: a mesma ação foi executada ${seen} vezes sem progresso.\n` +
@@ -404,6 +459,8 @@ export class AgentRunner {
             `RECOMENDAÇÃO: mude de estratégia — o conteúdo já está no histórico. Siga para a PRÓXIMA etapa da tarefa.`
           break
         }
+
+        this.toolCallCount++
 
         // ---- Cache de leitura: re-leitura do mesmo arquivo no mesmo run ----
         if (toolName === 'read_file' && typeof toolArgs.path === 'string') {
@@ -467,7 +524,10 @@ export class AgentRunner {
         this.steps.push(stepLog)
 
         // ---- DETECÇÃO DE LOOP (REPEATED_FAILURE) ----
-        if (!ok) {
+        // FIX do travamento: falhas de ferramentas best-effort
+        // (web_search) NÃO contam — a pesquisa degrada para vazio
+        // e o agente continua; nunca derrubam o run.
+        if (!ok && !AgentRunner.BEST_EFFORT_TOOLS.has(toolName)) {
           this.detector.record(toolName, toolArgs, observation)
           const repeated = this.detector.isRepeating()
           if (repeated) {
@@ -544,7 +604,9 @@ export class AgentRunner {
 
   private toolBudget = 200 // será ajustado pelo orchestrator via setToolBudget
   setToolBudget(n: number) {
-    this.toolBudget = Math.max(1, n)
+    // DELEGAÇÃO: teto do subagente (menor vence com o pedido)
+    const cap = this.input.budget?.maxToolCalls
+    this.toolBudget = Math.max(1, Math.min(n, cap ?? Number.POSITIVE_INFINITY))
     return this
   }
 }

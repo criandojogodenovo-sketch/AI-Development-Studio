@@ -51,6 +51,7 @@ import { failureSignature, agenticFixBudget, agenticFixDecision } from './loop-g
 import { taskText } from '../orchestrator/task-text.ts'
 import { budgetFor } from './budget.ts'
 import { buildCorrectionContext } from './correction-context.ts'
+import { planModeFor } from './fast-plan.ts'
 
 // ---------- TIPOS ----------
 
@@ -374,6 +375,11 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
     .join('\n')
     .slice(0, fileCap)
 
+  // FIX do travamento ("A pensar durante 45s…"): ritmo da análise
+  // classificado por pedido — pedidos claros produzem o plano no
+  // PRIMEIRO passo, sem pesquisas/inspeções obrigatórias.
+  const planMode = planModeFor(ctx.request)
+
   const out = await runAgent(
     {
       agent: master,
@@ -383,6 +389,8 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
       poskliRunId: ctx.runId,
       objective: [
         `Pedido do usuário: "${ctx.request}"`,
+        '',
+        `## RITMO RECOMENDADO PARA ESTE PEDIDO\n${planMode.hint}`,
         '',
         'Analise o estado atual do projeto e produza um plano JSON:',
         '{"plan": {"architecture": "...", "stack": [...], "tasks": [{"title": "...", "description": "...", "agentRole": "coding|testing|review", "priority": "HIGH|MEDIUM|LOW", "dependsOn": [índices]}]}}',

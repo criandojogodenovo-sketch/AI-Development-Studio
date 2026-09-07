@@ -7,23 +7,28 @@
 //   W2. rate limiter: 1 req/s — 1ª permitida, imediata seguinte
 //       bloqueada, após intervalo permitida de novo
 //   W3. formatWebResults: lista numerada compacta
-//   W4. TOOL (mock do fetch): query obrigatória, timeout 5s,
+//   W4. TOOL (mock do fetch): query obrigatória, timeout 10s,
 //       resultados no formato do contrato
-//   W5. TOOL: HTTP de erro → BUSCA_FALHOU honesto (sem crash)
-//   W6. TOOL: rate limit aplicado entre duas chamadas (espera)
+//   W5. FIX do travamento: HTTP de erro em TODOS os endpoints →
+//       ok:true com lista VAZIA (NUNCA bloqueia o agente)
+//   W5b. timeout (abort) → ok:true vazio + aviso de prosseguir
+//   W6. rate limit aplicado entre duas chamadas (espera)
+//   W8. parser do Instant Answer API (api.duckduckgo.com)
+//   W9. degradação total → duckDuckGoSearch { [], degraded: true }
 // ============================================================
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   parseDuckDuckGoLite,
+  parseDuckInstantAnswer,
   rateLimitDecision,
   formatWebResults,
   decodeDuckRedirect,
   decodeEntities,
   isAdResult,
 } from '../src/lib/studio/tools/web-search-core.ts'
-import { webSearchTool, resetWebSearchRateLimit } from '../src/lib/studio/tools/web-tools.ts'
+import { webSearchTool, duckDuckGoSearch, resetWebSearchRateLimit } from '../src/lib/studio/tools/web-tools.ts'
 import type { ToolCtx } from '../src/lib/studio/tools/types'
 
 // ---------- fixtures: HTML real (estrutura capturada do DDG) ----------
@@ -165,16 +170,30 @@ test('W4b — tool: fetch mockado devolve contrato {title,url,snippet}[]', async
   })
 })
 
-test('W5 — tool: HTTP 503 nos DOIS endpoints → BUSCA_FALHOU honesto (sem crash)', async () => {
+test('W5 — FIX travamento: HTTP 503 em TODOS os endpoints → ok:true com lista VAZIA (nunca bloqueia)', async () => {
   resetWebSearchRateLimit()
-  await withFetchMock(async () => new Response('busy', { status: 503 }), async () => {
+  const urls: string[] = []
+  await withFetchMock(async (url) => {
+    urls.push(String(url))
+    return new Response('busy', { status: 503 })
+  }, async () => {
     const res = await webSearchTool.execute({ query: 'anything' }, ctx)
-    assert.equal(res.ok, false)
-    assert.match(res.output, /BUSCA_FALHOU/)
+    // CONTRATO NOVO: falha total → vazio + aviso, ok:true
+    assert.equal(res.ok, true, 'falha de rede NUNCA devolve ok:false')
+    const data = (res.data ?? {}) as { count?: number; results?: unknown[]; degraded?: boolean }
+    assert.equal(data.count, 0)
+    assert.deepEqual(data.results, [])
+    assert.equal(data.degraded, true)
+    assert.match(res.output, /NENHUM resultado/i)
+    assert.match(res.output, /PROSSIGA/i, 'instrui o agente a continuar sem pesquisar')
+    assert.equal(urls.length, 3, '3 endpoints consultados (html → lite → api)')
+    assert.match(urls[0], /html\.duckduckgo\.com/)
+    assert.match(urls[1], /lite\.duckduckgo\.com/)
+    assert.match(urls[2], /api\.duckduckgo\.com/)
   })
 })
 
-test('W5c — tool: endpoint primário vazio (soft-block 202) → FALLBACK lite devolve resultados', async () => {
+test('W5c — tool: endpoint primário vazio (soft-block 202) → FALLBACK devolve resultados', async () => {
   resetWebSearchRateLimit()
   const urls: string[] = []
   await withFetchMock(async (url) => {
@@ -188,7 +207,7 @@ test('W5c — tool: endpoint primário vazio (soft-block 202) → FALLBACK lite 
   }, async () => {
     const res = await webSearchTool.execute({ query: 'cat design' }, ctx)
     assert.equal(res.ok, true, 'fallback recuperou a busca')
-    assert.equal(urls.length, 2, '2 endpoints consultados')
+    assert.equal(urls.length, 2, '2 endpoints consultados (3º não é preciso)')
     assert.match(urls[0], /html\.duckduckgo\.com/)
     assert.match(urls[1], /lite\.duckduckgo\.com/)
     const results = (res.data?.results as Array<{ url: string }>) ?? []
@@ -196,10 +215,10 @@ test('W5c — tool: endpoint primário vazio (soft-block 202) → FALLBACK lite 
   })
 })
 
-test('W5b — tool: timeout (abort) → BUSCA_TIMEOUT com dica', async () => {
+test('W5b — FIX travamento: timeout (abort) → ok:true vazio com aviso de prosseguir', async () => {
   resetWebSearchRateLimit()
   await withFetchMock(async (_url, init) => {
-    // simula o AbortSignal.timeout(5s) disparando imediatamente
+    // simula o AbortSignal.timeout disparando imediatamente
     const signal = init?.signal
     if (signal) {
       const err = new Error('The operation was aborted due to timeout')
@@ -209,8 +228,11 @@ test('W5b — tool: timeout (abort) → BUSCA_TIMEOUT com dica', async () => {
     return new Response(fakeHtml, { status: 200 })
   }, async () => {
     const res = await webSearchTool.execute({ query: 'slow query' }, ctx)
-    assert.equal(res.ok, false)
-    assert.match(res.output, /BUSCA_TIMEOUT/)
+    assert.equal(res.ok, true, 'timeout NUNCA bloqueia o agente')
+    const data = (res.data ?? {}) as { count?: number; results?: unknown[]; degraded?: boolean }
+    assert.equal(data.count, 0)
+    assert.equal(data.degraded, true)
+    assert.match(res.output, /PROSSIGA/i)
   })
 })
 
@@ -247,4 +269,100 @@ test('W7 — tool: max_results default 5 e cap 10', async () => {
     const res2 = await webSearchTool.execute({ query: 'many results 2', max_results: 99 }, ctx)
     assert.equal((res2.data?.count as number), 10, 'cap em 10')
   })
+})
+
+// ---------- W8: Instant Answer API (api.duckduckgo.com) ----------
+
+const fakeInstantAnswer = {
+  Heading: 'Node.js',
+  AbstractURL: 'https://en.wikipedia.org/wiki/Node.js',
+  AbstractText: 'Node.js é um runtime JavaScript - construído no V8.',
+  Results: [],
+  RelatedTopics: [
+    {
+      FirstURL: 'https://duckduckgo.com/c/Linux_Foundation_projects',
+      Result: '<a href="x">Linux Foundation projects</a>',
+      Text: 'Linux Foundation projects - projetos da fundação',
+    },
+    {
+      // grupo com Topics aninhados — deve ser achatado
+      Topics: [
+        { FirstURL: 'https://joyent.com', Result: '<a>Joyent</a>', Text: 'Joyent - mantenedora' },
+        { FirstURL: 'https://nodejs.org', Result: '<a>Node.js Site</a>', Text: 'Node.js Site - oficial' },
+      ],
+    },
+    {
+      // anúncio — filtrado
+      FirstURL: 'https://duckduckgo.com/y.js?ad_domain=x',
+      Text: 'Buy Node hosting',
+    },
+    {
+      // sem FirstURL — ignorado
+      Text: 'tópico sem URL',
+    },
+  ],
+}
+
+test('W8 — parser do Instant Answer: abstract + tópicos achatados, anúncios filtrados, cap respeitado', () => {
+  const res = parseDuckInstantAnswer(fakeInstantAnswer, 10)
+  assert.equal(res.length, 4, 'abstract + 1 tópico + 2 aninhados (ad e sem-URL fora)')
+  assert.equal(res[0].url, 'https://en.wikipedia.org/wiki/Node.js')
+  assert.equal(res[0].title, 'Node.js é um runtime JavaScript', 'título do abstract = 1º segmento do texto')
+  assert.equal(res[1].url, 'https://duckduckgo.com/c/Linux_Foundation_projects')
+  assert.equal(res[1].title, 'Linux Foundation projects')
+  assert.equal(res[2].url, 'https://joyent.com')
+  assert.equal(res[3].url, 'https://nodejs.org')
+  assert.ok(!res.some((r) => /y\.js|ad_domain/i.test(r.url)), 'anúncio filtrado')
+  // cap
+  assert.equal(parseDuckInstantAnswer(fakeInstantAnswer, 2).length, 2)
+  // JSON inválido → vazio (nunca lança)
+  assert.deepEqual(parseDuckInstantAnswer(null, 5), [])
+  assert.deepEqual(parseDuckInstantAnswer('não-json', 5), [])
+  assert.deepEqual(parseDuckInstantAnswer({}, 5), [])
+})
+
+test('W8b — endpoint api.duckduckgo.com usado como 3º fallback (JSON)', async () => {
+  resetWebSearchRateLimit()
+  const urls: string[] = []
+  await withFetchMock(async (url) => {
+    urls.push(String(url))
+    if (String(url).includes('api.duckduckgo.com')) {
+      return new Response(JSON.stringify(fakeInstantAnswer), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    // html e lite bloqueados (soft-block 202 sem resultados)
+    return new Response(fakeBlockedHtml, { status: 202, headers: { 'content-type': 'text/html' } })
+  }, async () => {
+    const res = await webSearchTool.execute({ query: 'node.js runtime' }, ctx)
+    assert.equal(res.ok, true)
+    assert.equal(urls.length, 3, '3º endpoint (api) consultado após html/lite bloqueados')
+    assert.match(urls[2], /api\.duckduckgo\.com/)
+    const results = (res.data?.results as Array<{ url: string }>) ?? []
+    assert.equal(results.length, 4, 'resultados do Instant Answer')
+    assert.equal(results[0].url, 'https://en.wikipedia.org/wiki/Node.js')
+    assert.equal(res.data?.degraded, undefined, 'não degradado — api respondeu')
+  })
+})
+
+// ---------- W9/W10: degradação e timeout ----------
+
+test('W9 — duckDuckGoSearch: falha total → { results: [], degraded: true } (contrato anti-travamento)', async () => {
+  resetWebSearchRateLimit()
+  await withFetchMock(async () => {
+    throw new Error('fetch failed: network unreachable')
+  }, async () => {
+    const outcome = await duckDuckGoSearch('anything', 5)
+    assert.deepEqual(outcome.results, [])
+    assert.equal(outcome.degraded, true)
+    assert.match(outcome.reason ?? '', /rede:/)
+  })
+})
+
+test('W10 — timeout da tool aumentado para 10s de orçamento (+3s de buffer no registry)', () => {
+  // pedido do usuário: "Se o timeout da tool for demasiado curto,
+  // aumenta para 10 segundos e adiciona fallback"
+  assert.equal(webSearchTool.timeoutMs, 13_000, '10s de busca + 3s de buffer no registry')
+  assert.match(webSearchTool.description, /OPCIONAL/i, 'descrição deixa claro que a tool é opcional')
 })

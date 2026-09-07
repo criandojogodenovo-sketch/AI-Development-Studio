@@ -58,6 +58,60 @@ export function isThinkingState(state: string): boolean {
   return state === 'ANALYZING' || state === 'PLANNING'
 }
 
+// ---------- guarda de travamento (FIX: "A pensar durante 45s…") ----------
+
+/** Limite (ms) sem NENHUMA ação de ferramenta em estado de
+ *  pensamento antes de avisar honestamente o utilizador. */
+export const THINKING_STALL_WARN_MS = 30_000
+
+/** Nota honesta exibida quando o agente está à espera do modelo
+ *  (em vez de um "A pensar…" infinito sem explicação). */
+export const THINKING_STALL_NOTE =
+  'Aguardando o modelo responder… o agente continua a trabalhar (não travou)'
+
+export interface ThinkingStallInput {
+  state: string
+  /** início do run (ms epoch). */
+  startedAtMs: number
+  /** última tool call (ms epoch) — null quando ainda não houve. */
+  lastToolAtMs: number | null
+  nowMs: number
+  /** personalizado p/ testes (default THINKING_STALL_WARN_MS). */
+  warnAfterMs?: number
+}
+
+export interface ThinkingStallDecision {
+  stalled: boolean
+  /** nota honesta quando stalled. */
+  note?: string
+}
+
+/**
+ * Guarda pura do estado de pensamento: estado de análise sem
+ * QUALQUER ação de ferramenta por > warnAfterMs → aviso honesto
+ * (o utilizador nunca fica a olhar para um "A pensar…" sem fim
+ * sem saber o que acontece). Não altera o run — apenas UX.
+ */
+export function thinkingStallDecision(p: ThinkingStallInput): ThinkingStallDecision {
+  if (!isThinkingState(p.state)) return { stalled: false }
+  const since = p.lastToolAtMs !== null ? p.nowMs - p.lastToolAtMs : p.nowMs - p.startedAtMs
+  const limit = p.warnAfterMs ?? THINKING_STALL_WARN_MS
+  if (since > limit) return { stalled: true, note: THINKING_STALL_NOTE }
+  return { stalled: false }
+}
+
+// ---------- acesso ao painel técnico (laboratório) ----------
+
+/**
+ * Visibilidade do acesso técnico ("Ver Detalhes Técnicos"):
+ * OCULTO por defeito; visível SOMENTE durante um run ativo
+ * (ou quando já está aberto, para o utilizador poder fechá-lo).
+ * Fora da execução a interface fica 100% limpa — apenas chat.
+ */
+export function techAccessVisible(p: { runActive: boolean; techOpen: boolean }): boolean {
+  return p.runActive || p.techOpen
+}
+
 // ---------- quota (429 honesto, sem loops) ----------
 
 /** Mensagem exata do produto quando a cota acaba (STOP imediato). */
@@ -103,7 +157,7 @@ export interface ChatQuestionEvent {
 
 export type ChatStreamEvent =
   | { type: 'state'; state: string; label: string }
-  | { type: 'thinking'; seconds: number }
+  | { type: 'thinking'; seconds: number; note?: string }
   | { type: 'activity'; activity: ChatActivityEvent }
   | { type: 'question'; question: ChatQuestionEvent }
   | { type: 'quota'; message: string }

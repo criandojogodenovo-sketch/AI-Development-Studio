@@ -23,6 +23,7 @@ import { askUserQuestionTool } from './user-tools'
 import { webSearchTool } from './web-tools'
 import { GIT_TOOLS } from './git-tools'
 import { GITHUB_TOOLS } from './github-tools'
+import { clipToolOutput } from '../context/clip.ts'
 import { validateArgs, type ToolCtx, type ToolDefinition, type ToolResult } from './types'
 
 const ALL_TOOLS: ToolDefinition[] = [
@@ -121,6 +122,13 @@ export async function runTool(
   }
 
   const durationMs = Date.now() - started
+  // TRUNCAGEM CENTRAL (delegação eficiente): TODAS as ferramentas
+  // truncam o output em 2k chars ANTES de persistir/emitir — o
+  // LLM já recebia clipToolOutput no runner; agora DB e eventos
+  // recebem o MESMO limite (sem outputs gigantes em toolCall).
+  if (typeof result.output === 'string' && result.output.length > 2_000) {
+    result = { ...result, output: clipToolOutput(result.output) }
+  }
   const status = result.ok ? 'OK' : result.output.startsWith('PERMISSÃO_NEGADA') ? 'DENIED' : 'ERROR'
   await recordCall(ctx, name, args, status as 'OK' | 'ERROR' | 'DENIED', result, null, durationMs)
 

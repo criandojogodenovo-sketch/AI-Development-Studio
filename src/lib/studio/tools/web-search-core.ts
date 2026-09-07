@@ -9,9 +9,11 @@
 // Puppeteer/Chrome ~150MB — inviável em Vercel serverless): fetch
 // nativo ao DuckDuckGo + parser por regex.
 //
-// Dois endpoints suportados (validados ao vivo em 2026-09):
+// Três endpoints suportados (validados ao vivo em 2026-09):
 //   1. html.duckduckgo.com/html/  (primário — mais resultados)
 //   2. lite.duckduckgo.com/lite/  (fallback — às vezes soft-block 202)
+//   3. api.duckduckgo.com         (Instant Answer JSON — raramente
+//      bloqueado; devolve tópicos relacionados/resposta instantânea)
 // Estruturas com atributos EM ORDEM VARIÁVEL:
 //   <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=<enc>">T</a>
 //   <a class="result__snippet" href="...">S</a>
@@ -136,6 +138,80 @@ export function parseDuckDuckGo(html: string, maxResults = 5): WebSearchResult[]
 
 /** Alias de compatibilidade (endpoint lite). */
 export const parseDuckDuckGoLite = parseDuckDuckGo
+
+// ---------- INSTANT ANSWER API (api.duckduckgo.com) ----------
+
+/** Tópico do JSON do Instant Answer (RelatedTopics pode aninhar Topics). */
+interface IaTopic {
+  FirstURL?: string
+  Text?: string
+  Result?: string
+  Topics?: IaTopic[]
+}
+
+/**
+ * Parser do JSON do Instant Answer API (api.duckduckgo.com):
+ *   - Abstract (Heading/AbstractURL/AbstractText) = resposta principal;
+ *   - Results[] + RelatedTopics[] (achatando Topics aninhados) com
+ *     {FirstURL, Text, Result}.
+ * Título = primeiro segmento de Text ("Título - resto"), fallback =
+ * âncora do Result sem tags. Anúncios e duplicados removidos.
+ * Puro e determinístico — testável com JSON capturado.
+ */
+export function parseDuckInstantAnswer(json: unknown, maxResults = 5): WebSearchResult[] {
+  if (!json || typeof json !== 'object') return []
+  const j = json as {
+    Heading?: unknown
+    AbstractURL?: unknown
+    AbstractText?: unknown
+    Results?: IaTopic[]
+    RelatedTopics?: IaTopic[]
+  }
+  const out: WebSearchResult[] = []
+  const seen = new Set<string>()
+
+  const push = (url: string, snippet: string, fallbackTitle: string): void => {
+    if (!url || seen.has(url) || isAdResult(url)) return
+    seen.add(url)
+    const cleanSnippet = clean(snippet)
+    const title =
+      cleanSnippet.split(' - ')[0]?.trim() ||
+      clean(fallbackTitle) ||
+      url
+    out.push({ title, url, snippet: cleanSnippet.slice(0, 300) })
+  }
+
+  // 1) Abstract — resposta instantânea principal
+  const abstractUrl = typeof j.AbstractURL === 'string' ? j.AbstractURL : ''
+  if (abstractUrl) {
+    push(
+      abstractUrl,
+      typeof j.AbstractText === 'string' ? j.AbstractText : '',
+      typeof j.Heading === 'string' ? j.Heading : ''
+    )
+  }
+
+  // 2) Results + RelatedTopics (achatados)
+  const flat: IaTopic[] = []
+  const walk = (list?: IaTopic[]): void => {
+    for (const t of list ?? []) {
+      if (t.Topics && t.Topics.length > 0) walk(t.Topics)
+      else flat.push(t)
+    }
+  }
+  walk(j.Results)
+  walk(j.RelatedTopics)
+  for (const t of flat) {
+    if (out.length >= Math.max(1, maxResults)) break
+    if (typeof t.FirstURL !== 'string' || !t.FirstURL) continue
+    push(
+      t.FirstURL,
+      typeof t.Text === 'string' ? t.Text : '',
+      typeof t.Result === 'string' ? t.Result : ''
+    )
+  }
+  return out.slice(0, Math.max(1, maxResults))
+}
 
 // ---------- RATE LIMIT (1 requisição por segundo — global) ----------
 
