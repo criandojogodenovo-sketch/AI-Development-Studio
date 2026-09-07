@@ -16,6 +16,8 @@ async function ownedRun(id: string, userId: string) {
 /**
  * GET /api/poskli/:id — detalhe completo: estágios, tarefas,
  * execuções do run (com saída real), resultado markdown.
+ * Inclui: pergunta pendente do agente (ask_user_question) e
+ * atividade recente (traduzida para linguagem de produto na UI).
  */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getSessionUser(req)
@@ -42,7 +44,40 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     },
   }).catch(() => [])
 
-  return NextResponse.json({ run, tasks: progress, executions })
+  // ---- interatividade: pergunta pendente do agente ----
+  const pendingQuestion = await db.toolCall
+    .findFirst({
+      where: {
+        tool: 'ask_user_question',
+        status: 'PENDING',
+        projectId: run.projectId,
+        createdAt: { gte: run.startedAt },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+    .catch(() => null)
+
+  // ---- atividade recente (stream de ações do agente) ----
+  const activity = await db.toolCall.findMany({
+    where: { projectId: run.projectId, createdAt: { gte: run.startedAt } },
+    orderBy: { createdAt: 'desc' },
+    take: 14,
+    select: { id: true, tool: true, status: true, createdAt: true, durationMs: true, args: true },
+  }).catch(() => [])
+
+  return NextResponse.json({
+    run,
+    tasks: progress,
+    executions,
+    pendingQuestion: pendingQuestion
+      ? {
+          toolCallId: pendingQuestion.id,
+          questions: ((pendingQuestion.args as { questions?: unknown[] })?.questions ?? []) as unknown[],
+          createdAt: pendingQuestion.createdAt,
+        }
+      : null,
+    activity,
+  })
 }
 
 /** DELETE /api/poskli/:id — CANCELAMENTO cooperativo (entre estágios). */

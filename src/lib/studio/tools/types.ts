@@ -4,12 +4,13 @@
 // logs (ToolCall no DB), timeout e tratamento de erro.
 // ============================================================
 
-export type ToolCategory = 'fs' | 'exec' | 'git' | 'github' | 'info'
+export type ToolCategory = 'fs' | 'exec' | 'git' | 'github' | 'info' | 'user' | 'game'
 export type ToolPermission =
   | 'fs:read' | 'fs:write' | 'fs:delete'
   | 'exec:command' | 'exec:tests'
   | 'git:read' | 'git:write'
   | 'github:read' | 'github:write'
+  | 'user:ask'
 
 export interface ToolParam {
   name: string
@@ -26,6 +27,9 @@ export interface ToolCtx {
   agentId: string
   /** Permissões concedidas a este agente (allowedTools). */
   permissions: string[]
+  /** Run do Poskli a que esta execução pertence (interatividade/
+   *  cancelamento cooperativo); ausente fora do Poskli. */
+  poskliRunId?: string
 }
 
 export interface ToolResult {
