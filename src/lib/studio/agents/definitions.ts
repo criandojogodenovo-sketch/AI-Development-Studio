@@ -7,7 +7,7 @@
 // ============================================================
 
 import type { ToolPermission } from '../tools/types'
-import { SYSTEM_PROMPTS } from './prompts'
+import { SYSTEM_PROMPTS } from './prompts.ts'
 
 export type AgentRole =
   | 'master' | 'coding' | 'review' | 'testing' | 'github'

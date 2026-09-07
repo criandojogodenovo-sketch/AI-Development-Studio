@@ -33,7 +33,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const progress = await db.task.findMany({
     where: { projectId: run.projectId },
     orderBy: { order: 'asc' },
-    select: { id: true, order: true, title: true, description: true, status: true, agentRole: true, priority: true, attempts: true, maxAttempts: true, error: true, result: true },
+    select: { id: true, order: true, title: true, description: true, status: true, agentRole: true, priority: true, attempts: true, maxAttempts: true, error: true, result: true, createdAt: true },
     take: 20,
   }).catch(() => [])
   const tasks = progress.map((t) => {

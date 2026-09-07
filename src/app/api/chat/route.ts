@@ -14,7 +14,7 @@ import { emitEvent } from '@/lib/studio/events/bus'
 import {
   friendlyRunState, isThinkingState, isChatTerminal, isQuotaErrorCode,
   safeRunResult, activityToChatEvent, encodeSseEvent, QUOTA_EXHAUSTED_MESSAGE,
-  thinkingStallDecision,
+  thinkingStallDecision, chatAgentLabel,
 } from '@/lib/poskli-chat'
 
 export const dynamic = 'force-dynamic'
@@ -242,6 +242,8 @@ async function streamRunEvents(req: Request, runId: string, userId: string) {
 
       let lastState = ''
       let questionSent = ''
+      let planSent = false
+      const sentTasks = new Map<string, string>()
       const sentActivity = new Map<string, string>()
       const deadline = Date.now() + STREAM_TIMEOUT_MS
 
@@ -267,6 +269,47 @@ async function streamRunEvents(req: Request, runId: string, userId: string) {
             take: 40,
             select: { id: true, tool: true, status: true, createdAt: true, durationMs: true, args: true },
           }).catch(() => [] as Array<{ id: string; tool: string; status: string; createdAt: Date; durationMs: number; args: unknown }>)
+
+          // ---- FASE VISÍVEL: plano (passos) assim que persiste ----
+          if (!planSent && !isThinkingState(current.state)) {
+            const plan = current.plan as { tasks?: Array<{ title?: unknown; agentRole?: unknown }>; architecture?: unknown } | null
+            const planTasks = Array.isArray(plan?.tasks) ? (plan?.tasks ?? []) : []
+            if (planTasks.length > 0) {
+              planSent = true
+              send(encodeSseEvent({
+                type: 'plan',
+                steps: planTasks.slice(0, 8).map((t) => ({
+                  title: typeof t?.title === 'string' ? t.title : String(t?.title ?? ''),
+                  agent: chatAgentLabel(typeof t?.agentRole === 'string' ? t.agentRole : 'coding'),
+                })),
+                ...(typeof plan?.architecture === 'string' && plan.architecture
+                  ? { architecture: plan.architecture }
+                  : {}),
+              }))
+            }
+          }
+
+          // ---- FASE VISÍVEL: delegações (tarefas do grafo do run) ----
+          // escopo: tarefas criadas DEPOIS do início deste run (runs
+          // anteriores no mesmo projeto não reemitem delegações)
+          const taskRows = await db.task.findMany({
+            where: { projectId: current.projectId, status: { not: 'CANCELLED' }, createdAt: { gte: current.startedAt } },
+            orderBy: { order: 'asc' },
+            take: 12,
+            select: { id: true, title: true, agentRole: true, status: true },
+          }).catch(() => [] as Array<{ id: string; title: string; agentRole: string; status: string }>)
+          for (const t of taskRows) {
+            if (sentTasks.get(t.id) === t.status) continue
+            sentTasks.set(t.id, t.status)
+            send(encodeSseEvent({
+              type: 'delegation',
+              taskId: t.id,
+              title: t.title,
+              agent: chatAgentLabel(t.agentRole),
+              status: t.status,
+            }))
+          }
+
           for (const row of rows) {
             if (sentActivity.get(row.id) === row.status) continue
             sentActivity.set(row.id, row.status)

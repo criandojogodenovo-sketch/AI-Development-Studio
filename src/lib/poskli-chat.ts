@@ -155,9 +155,18 @@ export interface ChatQuestionEvent {
   questions: unknown[]
 }
 
+/** Passo do plano visível no chat (após a fase de análise). */
+export interface ChatPlanStep {
+  title: string
+  /** label de produto do subagente ("agente de programação"). */
+  agent: string
+}
+
 export type ChatStreamEvent =
   | { type: 'state'; state: string; label: string }
   | { type: 'thinking'; seconds: number; note?: string }
+  | { type: 'plan'; steps: ChatPlanStep[]; architecture?: string }
+  | { type: 'delegation'; taskId: string; title: string; agent: string; status: string }
   | { type: 'activity'; activity: ChatActivityEvent }
   | { type: 'question'; question: ChatQuestionEvent }
   | { type: 'quota'; message: string }
@@ -177,6 +186,22 @@ export interface ChatRunSnapshot {
   }
   activity: Array<ActivityEntry & { id: string }>
   pendingQuestion: ChatQuestionEvent | null
+  /** FASES VISÍVEIS: plano persistido do run (após PLANNING). */
+  plan?: ChatPlanSnapshot | null
+  /** FASES VISÍVEIS: tarefas delegadas (grafo do run). */
+  tasks?: ChatTaskSnapshot[]
+}
+
+export interface ChatPlanSnapshot {
+  architecture?: string
+  tasks?: Array<{ title?: unknown; agentRole?: unknown }>
+}
+
+export interface ChatTaskSnapshot {
+  id: string
+  title: string
+  agentRole: string
+  status: string
 }
 
 /** Traduz uma linha de atividade (ToolCall) para evento de chat. */
@@ -193,10 +218,33 @@ export function activityToChatEvent(entry: ActivityEntry & { id: string }): Chat
   }
 }
 
+/** Label de produto do subagente por agentRole (sem nomes técnicos). */
+const AGENT_LABELS: Record<string, string> = {
+  coding: 'agente de programação',
+  testing: 'agente de testes',
+  review: 'agente de revisão',
+  github: 'agente de publicação',
+  master: 'orquestrador',
+}
+
+export function chatAgentLabel(role: string): string {
+  return AGENT_LABELS[(role ?? '').toLowerCase()] ?? 'agente especializado'
+}
+
+/** Extrai o título em texto de uma task do plano (defensivo). */
+function planTitleOf(t: { title?: unknown; agentRole?: unknown }): string {
+  return typeof t.title === 'string' ? t.title : String(t.title ?? '')
+}
+
 /**
  * Deriva os eventos de chat de um snapshot do run — IDEMPOTENTE:
  * dado o mesmo snapshot, os mesmos eventos (o cliente/SSE pode
  * reprocessar sem duplicar: `activity.id` é a chave).
+ * FASES VISÍVEIS (refactor da delegação):
+ *   1. estado ("A analisar o pedido…")
+ *   2. plano com passos numerados (assim que PLANNING persiste)
+ *   3. delegações ("A delegar «X» ao agente de programação…")
+ *   4. ações (tool calls) · 5. pergunta · 6. terminal
  */
 export function deriveChatEvents(snapshot: ChatRunSnapshot): ChatStreamEvent[] {
   const events: ChatStreamEvent[] = []
@@ -205,17 +253,44 @@ export function deriveChatEvents(snapshot: ChatRunSnapshot): ChatStreamEvent[] {
   // 1) estado atual (frase natural)
   events.push({ type: 'state', state: run.state, label: friendlyRunState(run.state) })
 
-  // 2) ações do agente (em ORDEM — conversa)
+  // 2) FASE VISÍVEL: plano (passos numerados) — emitido quando o
+  //    run já passou por PLANNING e persistiu o plano
+  const planTasks = snapshot.plan?.tasks ?? []
+  if (planTasks.length > 0 && !isThinkingState(run.state)) {
+    events.push({
+      type: 'plan',
+      steps: planTasks.slice(0, 8).map((t) => ({
+        title: planTitleOf(t),
+        agent: chatAgentLabel(typeof t.agentRole === 'string' ? t.agentRole : 'coding'),
+      })),
+      ...(typeof snapshot.plan?.architecture === 'string' && snapshot.plan.architecture
+        ? { architecture: snapshot.plan.architecture }
+        : {}),
+    })
+  }
+
+  // 3) FASE VISÍVEL: delegações por tarefa (idempotente por taskId)
+  for (const t of snapshot.tasks ?? []) {
+    events.push({
+      type: 'delegation',
+      taskId: t.id,
+      title: t.title,
+      agent: chatAgentLabel(t.agentRole),
+      status: t.status,
+    })
+  }
+
+  // 4) ações do agente (em ORDEM — conversa)
   for (const entry of snapshot.activity) {
     events.push({ type: 'activity', activity: activityToChatEvent(entry) })
   }
 
-  // 3) pergunta pendente → modal
+  // 5) pergunta pendente → modal
   if (snapshot.pendingQuestion) {
     events.push({ type: 'question', question: snapshot.pendingQuestion })
   }
 
-  // 4) terminal → quota | resultado + fim
+  // 6) terminal → quota | resultado + fim
   if (isChatTerminal(run.state)) {
     if (isQuotaErrorCode(run.errorCode)) {
       events.push({ type: 'quota', message: QUOTA_EXHAUSTED_MESSAGE })

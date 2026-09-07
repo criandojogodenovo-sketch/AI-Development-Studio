@@ -8,12 +8,12 @@
 // nunca código cru, nunca nomes de modelos.
 // ============================================================
 
-import { Brain, Ban, Activity, Send, BadgeCheck, CircleAlert, ShieldQuestion, Square, XCircle, Loader2 } from 'lucide-react'
+import { Brain, Ban, Activity, Send, BadgeCheck, CircleAlert, ShieldQuestion, Square, XCircle, Loader2, ListChecks, UserCog, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Markdown } from '../markdown'
 import { formatDuration } from '../ui-helpers'
 import { ActivityLog } from './activity-log'
-import { QUOTA_EXHAUSTED_MESSAGE, type ChatActivityEvent } from '@/lib/poskli-chat'
+import { QUOTA_EXHAUSTED_MESSAGE, type ChatActivityEvent, type ChatPlanStep } from '@/lib/poskli-chat'
 import type { ClarifyQuestion } from '@/lib/studio/projects/intent-router'
 
 function AgentAvatar({ tone = 'default' }: { tone?: 'default' | 'amber' }) {
@@ -84,6 +84,83 @@ export function StatusBubble({ label }: { label: string }) {
       <div className="rounded-2xl rounded-bl-md bg-zinc-900/40 border border-zinc-800/40 px-3.5 py-2 text-[12px] text-zinc-400 flex items-center gap-2">
         <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" aria-hidden />
         {label}
+      </div>
+    </div>
+  )
+}
+
+/** FASE VISÍVEL — o PLANO do orquestrador antes de executar:
+ *  passos numerados + subagente de cada passo. */
+export function PlanBubble({ steps, architecture }: { steps: ChatPlanStep[]; architecture?: string }) {
+  return (
+    <div className="flex gap-2.5">
+      <AgentAvatar />
+      <div className="flex-1 min-w-0 max-w-[85%] rounded-2xl rounded-bl-md bg-zinc-900/50 border border-zinc-800/60 px-3.5 py-3 space-y-2">
+        <p className="text-[9px] uppercase tracking-wider text-zinc-600 flex items-center gap-1">
+          <ListChecks className="w-3 h-3" /> Plano
+        </p>
+        {architecture && (
+          <p className="text-[11.5px] text-zinc-400 leading-relaxed">{architecture.slice(0, 220)}</p>
+        )}
+        <ol className="space-y-1.5">
+          {steps.map((s, i) => (
+            <li key={`${i}-${s.title.slice(0, 30)}`} className="flex items-start gap-2 text-[12.5px]">
+              <span className="shrink-0 w-5 h-5 rounded-md bg-zinc-800/80 border border-zinc-700 text-[10px] font-semibold text-zinc-300 flex items-center justify-center mt-0.5">
+                {i + 1}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="text-zinc-200 break-words">{s.title}</span>
+                <span className="block text-[10px] text-zinc-500 mt-0.5 flex items-center gap-1">
+                  <UserCog className="w-2.5 h-2.5" aria-hidden /> {s.agent}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  )
+}
+
+/** FASE VISÍVEL — delegação a subagente especializado:
+ *  "A delegar «X» ao agente de programação…" (→ concluída ✓). */
+export function DelegationBubble({ title, agent, status }: { title: string; agent: string; status: string }) {
+  const done = status === 'COMPLETED'
+  const failed = status === 'FAILED'
+  return (
+    <div className="flex gap-2.5">
+      <AgentAvatar />
+      <div
+        className={`rounded-2xl rounded-bl-md border px-3.5 py-2 text-[12px] flex items-center gap-2 max-w-[85%] ${
+          failed
+            ? 'bg-red-950/20 border-red-900/40 text-red-300'
+            : done
+              ? 'bg-zinc-900/40 border-zinc-800/40 text-zinc-500'
+              : 'bg-zinc-900/40 border-zinc-800/40 text-zinc-300'
+        }`}
+      >
+        {done ? (
+          <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" aria-hidden />
+        ) : failed ? (
+          <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" aria-hidden />
+        ) : (
+          <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin shrink-0" aria-hidden />
+        )}
+        <span className="break-words">
+          {done ? (
+            <>
+              Tarefa «{title}» concluída pelo {agent}
+            </>
+          ) : failed ? (
+            <>
+              Tarefa «{title}» não concluída pelo {agent}
+            </>
+          ) : (
+            <>
+              A delegar «{title}» ao {agent}…
+            </>
+          )}
+        </span>
       </div>
     </div>
   )

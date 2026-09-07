@@ -52,6 +52,7 @@ import { taskText } from '../orchestrator/task-text.ts'
 import { budgetFor } from './budget.ts'
 import { buildCorrectionContext } from './correction-context.ts'
 import { planModeFor } from './fast-plan.ts'
+import { subagentBudgetFor, clampSubagentBudgets, delegationMessage } from './delegation.ts'
 
 // ---------- TIPOS ----------
 
@@ -444,18 +445,58 @@ async function implementTask(
   const agent = getAgent(task.agentRole) ?? getAgent('coding')!
   const root = await ensureMaterialized(ctx.projectId)
   const memory = await readProjectMemory(ctx.projectId)
-  const files = await selectRelevantFiles(root, [], task.title + ' ' + task.description)
-  // FASE 2 — teto de contexto por NÍVEL (era 16k fixo) + trechos
-  // menores por arquivo (2500 → fileCap/6): menos duplicação entre
-  // ANALYZING e IMPLEMENTING dos MESMOS arquivos.
-  const fileCap = ctx.budget.contextFileChars
-  const fileBlock = files
-    .map((f) => `### ${f.path}\n\`\`\`\n${f.content.slice(0, Math.min(1800, Math.floor(fileCap / 6)))}\n\`\`\``)
-    .join('\n')
-    .slice(0, fileCap)
+
+  // FASE VISÍVEL — delegação: o orquestrador ANUNCIA a tarefa e o
+  // subagente especializado que a vai executar ("A delegar…")
+  await emitEvent({
+    type: 'task.delegated',
+    projectId: ctx.projectId,
+    taskId: task.id,
+    runId: ctx.runId,
+    agent: agent.id,
+    message: `Poskli — ${delegationMessage(task.title, task.agentRole)}`,
+    data: { taskTitle: task.title.slice(0, 120), subagent: task.agentRole },
+  })
+
+  // DELEGAÇÃO EFICIENTE — contexto MÍNIMO por subagente: o REVIEW
+  // recebe diff + registos de testes (não o projeto inteiro); os
+  // demais recebem os arquivos RELEVANTES à tarefa (teto por nível)
+  let fileBlock: string
+  if (task.agentRole === 'review') {
+    const diff = await workspaceDiffSummary(ctx)
+    const lastTests = ctx.testRecords
+      .slice(-2)
+      .map((t) => `- ${t.status} (${t.command}, exit ${t.exitCode})`)
+      .join('\n')
+    fileBlock = [
+      '## DIFF A REVISAR (linhas alteradas)',
+      diff,
+      lastTests ? `## ÚLTIMOS TESTES\n${lastTests}` : '(sem testes ainda)',
+    ].join('\n\n')
+  } else {
+    const files = await selectRelevantFiles(root, [], task.title + ' ' + task.description)
+    // FASE 2 — teto de contexto por NÍVEL (era 16k fixo) + trechos
+    // menores por arquivo (2500 → fileCap/6): menos duplicação entre
+    // ANALYZING e IMPLEMENTING dos MESMOS arquivos.
+    const fileCap = ctx.budget.contextFileChars
+    fileBlock = files
+      .map((f) => `### ${f.path}\n\`\`\`\n${f.content.slice(0, Math.min(1800, Math.floor(fileCap / 6)))}\n\`\`\``)
+      .join('\n')
+      .slice(0, fileCap)
+  }
 
   await transitionTask(task.id, 'RUNNING', { attempts: { increment: 1 }, input: { description: task.description, agentRole: task.agentRole, poskli: ctx.runId } as object })
   await emitEvent({ type: 'task.started', projectId: ctx.projectId, taskId: task.id, runId: ctx.runId, agent: agent.id, message: `Poskli — implementando: ${task.title}` })
+
+  // DELEGAÇÃO — orçamentos ESPECÍFICOS do subagente (coding 20
+  // tools/30k tokens · testing 5/10k · review 5/10k), clamped ao
+  // nível do Poskli (o menor vence). Excedeu → "Orçamento atingido,
+  // a terminar" no resultado (AgentRunner).
+  const subBudget = subagentBudgetFor(task.agentRole)
+  const subClamp = subBudget ? clampSubagentBudgets(ctx.budget, subBudget) : null
+  const toolCallCap = subClamp
+    ? subClamp.maxToolCalls
+    : Math.min(STUDIO_CONFIG.limits.maxToolCalls, ctx.budget.maxToolCalls)
 
   const out = await runAgent(
     {
@@ -473,15 +514,24 @@ async function implementTask(
         '',
         'Complete a tarefa com código real. Ao final, cite evidências.',
       ].filter(Boolean).join('\n'),
-      contextBlock: [`## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`, fileBlock ? `## ARQUIVOS ATUAIS\n${fileBlock}` : ''].filter(Boolean).join('\n\n'),
-      // FASE 2 — orçamento por nível (steps/timeout) aplicado ao executor
-      budget: { maxSteps: ctx.budget.maxSteps, agentTimeoutMs: ctx.budget.agentTimeoutMs },
+      contextBlock: [`## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`, fileBlock ? `## ${task.agentRole === 'review' ? 'EVIDÊNCIAS' : 'ARQUIVOS ATUAIS'}\n${fileBlock}` : ''].filter(Boolean).join('\n\n'),
+      // FASE 2 — orçamento por nível (steps/timeout) + DELEGAÇÃO
+      // (tool calls e tokens do subagente)
+      budget: {
+        maxSteps: ctx.budget.maxSteps,
+        agentTimeoutMs: ctx.budget.agentTimeoutMs,
+        ...(subClamp ? { maxToolCalls: subClamp.maxToolCalls, tokenBudget: subClamp.tokenBudget } : {}),
+      },
     },
-    Math.min(STUDIO_CONFIG.limits.maxToolCalls, ctx.budget.maxToolCalls)
+    toolCallCap
   )
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
   ctx.agentRunIds.push(out.runId)
+  // Orçamento atingido → evidência honesta do subagente no run
+  if (out.status === 'MAX_LIMITS_REACHED' && /ORÇAMENTO_ATINGIDO/.test(out.result)) {
+    ctx.evidence.push(`${task.title}: ${out.result.split('\n')[0].slice(0, 140)}`)
+  }
   return { status: out.status, result: out.result }
 }
 

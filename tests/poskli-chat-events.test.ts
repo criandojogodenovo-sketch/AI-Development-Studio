@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import {
   friendlyRunState, isChatTerminal, isThinkingState,
   isQuotaErrorCode, QUOTA_EXHAUSTED_MESSAGE, safeRunResult,
-  deriveChatEvents, encodeSseEvent, activityToChatEvent, isFriendlyChatLabel,
+  deriveChatEvents, encodeSseEvent, activityToChatEvent, isFriendlyChatLabel, chatAgentLabel,
   type ChatRunSnapshot,
 } from '../src/lib/poskli-chat.ts'
 
@@ -184,5 +184,104 @@ test('B6 — atividade do chat SEM nomes técnicos e SEM código cru', () => {
   // labels de todos os eventos são amigáveis
   for (const e of [ev, web, img, cmd, failed]) {
     assert.ok(isFriendlyChatLabel(e.label), `label limpa: ${e.label}`)
+  }
+})
+
+// ---------- FASES VISÍVEIS: plano + delegação (refactor) ----------
+
+test('B7 — FASE VISÍVEL: plano com passos numerados após PLANNING (nunca durante o pensamento)', () => {
+  const snap: ChatRunSnapshot = {
+    run: { id: 'r1', state: 'IMPLEMENTING', errorCode: null, error: null, result: null },
+    activity: [],
+    pendingQuestion: null,
+    plan: {
+      architecture: 'Landing page estática com CSS moderno',
+      tasks: [
+        { title: 'Criar estrutura', agentRole: 'coding' },
+        { title: 'Implementar conteúdo', agentRole: 'coding' },
+        { title: 'Testar tudo', agentRole: 'testing' },
+        { title: 'Rever qualidade', agentRole: 'review' },
+      ],
+    },
+    tasks: [],
+  }
+  const events = deriveChatEvents(snap)
+  const plan = events.find((e) => e.type === 'plan')
+  assert.ok(plan, 'evento plan presente')
+  const p = plan as { steps: Array<{ title: string; agent: string }>; architecture?: string }
+  assert.equal(p.steps.length, 4)
+  assert.equal(p.steps[0].title, 'Criar estrutura')
+  assert.equal(p.steps[0].agent, 'agente de programação')
+  assert.equal(p.steps[2].agent, 'agente de testes')
+  assert.equal(p.steps[3].agent, 'agente de revisão')
+  assert.equal(p.architecture, 'Landing page estática com CSS moderno')
+
+  // durante ANALYZING/PLANNING o plano AINDA não aparece (fase de
+  // análise visível primeiro — "A analisar o pedido…")
+  const thinking = deriveChatEvents({ ...snap, run: { ...snap.run, state: 'ANALYZING' } })
+  assert.ok(!thinking.some((e) => e.type === 'plan'), 'sem plano durante a análise')
+
+  // títulos-objeto (defensivo) não crasham
+  const weird = deriveChatEvents({
+    ...snap,
+    plan: { tasks: [{ title: { complex: 'objeto' }, agentRole: 'coding' }] },
+  })
+  const wp = weird.find((e) => e.type === 'plan') as { steps: Array<{ title: string }> }
+  assert.equal(typeof wp.steps[0].title, 'string')
+})
+
+test('B8 — FASE VISÍVEL: delegações por tarefa (idempotente por taskId, ordem do grafo)', () => {
+  const snap: ChatRunSnapshot = {
+    run: { id: 'r1', state: 'IMPLEMENTING', errorCode: null, error: null, result: null },
+    activity: [],
+    pendingQuestion: null,
+    tasks: [
+      { id: 't1', title: 'Criar estrutura', agentRole: 'coding', status: 'COMPLETED' },
+      { id: 't2', title: 'Implementar conteúdo', agentRole: 'coding', status: 'RUNNING' },
+      { id: 't3', title: 'Testar tudo', agentRole: 'testing', status: 'PENDING' },
+    ],
+  }
+  const events = deriveChatEvents(snap)
+  const delegations = events.filter((e) => e.type === 'delegation') as Array<{
+    taskId: string; title: string; agent: string; status: string
+  }>
+  assert.equal(delegations.length, 3, 'uma delegação por tarefa')
+  assert.equal(delegations[0].taskId, 't1')
+  assert.equal(delegations[0].status, 'COMPLETED')
+  assert.equal(delegations[1].agent, 'agente de programação')
+  assert.equal(delegations[2].agent, 'agente de testes')
+  // reprocessar o MESMO snapshot → mesmas delegações (idempotente)
+  assert.equal(deriveChatEvents(snap).filter((e) => e.type === 'delegation').length, 3)
+  // sem tarefas → sem delegações
+  assert.equal(deriveChatEvents({ ...snap, tasks: [] }).filter((e) => e.type === 'delegation').length, 0)
+})
+
+test('B9 — ordem das fases no stream: state → plan → delegations → activity → terminal', () => {
+  const snap: ChatRunSnapshot = {
+    run: { id: 'r1', state: 'COMPLETED', errorCode: null, error: null, result: { output: 'ok' } },
+    activity: [{ id: 'a1', tool: 'create_file', status: 'OK', createdAt: '', path: 'index.html' }],
+    pendingQuestion: null,
+    plan: { tasks: [{ title: 'Estrutura', agentRole: 'coding' }] },
+    tasks: [{ id: 't1', title: 'Estrutura', agentRole: 'coding', status: 'COMPLETED' }],
+  }
+  const types = deriveChatEvents(snap).map((e) => e.type)
+  const idx = (t: (typeof types)[number]) => types.indexOf(t)
+  assert.ok(idx('state') < idx('plan'), 'estado antes do plano')
+  assert.ok(idx('plan') < idx('delegation'), 'plano antes das delegações')
+  assert.ok(idx('delegation') < idx('activity'), 'delegações antes das ações')
+  assert.ok(idx('activity') < idx('result'), 'ações antes do resultado')
+  assert.equal(types[types.length - 1], 'done', 'done é o último')
+})
+
+test('B10 — labels de agente: chatAgentLabel sem nomes técnicos de modelos', () => {
+  assert.equal(chatAgentLabel('coding'), 'agente de programação')
+  assert.equal(chatAgentLabel('testing'), 'agente de testes')
+  assert.equal(chatAgentLabel('review'), 'agente de revisão')
+  assert.equal(chatAgentLabel('github'), 'agente de publicação')
+  assert.equal(chatAgentLabel('master'), 'orquestrador')
+  assert.equal(chatAgentLabel('qualquer'), 'agente especializado')
+  // nenhum label expõe nomes técnicos
+  for (const role of ['coding', 'testing', 'review', 'github', 'master', 'x']) {
+    assert.ok(isFriendlyChatLabel(chatAgentLabel(role)), `label limpo para ${role}`)
   }
 })

@@ -28,12 +28,13 @@ import {
 } from '@/lib/poskli-version'
 import {
   friendlyRunState, isThinkingState, isChatTerminal, isQuotaErrorCode,
-  safeRunResult, activityToChatEvent, thinkingStallDecision,
-  type ChatStreamEvent, type ChatActivityEvent, type ChatQuestionEvent,
+  safeRunResult, activityToChatEvent, thinkingStallDecision, chatAgentLabel,
+  type ChatStreamEvent, type ChatActivityEvent, type ChatQuestionEvent, type ChatPlanStep,
 } from '@/lib/poskli-chat'
 import type { ClarifyQuestion } from '@/lib/studio/projects/intent-router'
 import {
   UserBubble, AgentBubble, ThinkingBubble, StatusBubble, ActivityCard, QuotaBubble, TerminalBadge, ClarifyCard,
+  PlanBubble, DelegationBubble,
 } from './chat-bubbles'
 import {
   Brain, Send, Loader2, Square, Cpu, MessageCircleQuestion, Sparkles, Gamepad2,
@@ -107,6 +108,8 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
   const [liveState, setLiveState] = useState<{ state: string; label: string } | null>(null)
   const [thinkingSecs, setThinkingSecs] = useState(0)
   const [thinkingNote, setThinkingNote] = useState<string | undefined>(undefined)
+  const [livePlan, setLivePlan] = useState<{ steps: ChatPlanStep[]; architecture?: string } | null>(null)
+  const [delegations, setDelegations] = useState<Array<{ taskId: string; title: string; agent: string; status: string }>>([])
   const [activity, setActivity] = useState<ChatActivityEvent[]>([])
   const [liveResult, setLiveResult] = useState<string | null>(null)
   const [liveQuota, setLiveQuota] = useState(false)
@@ -152,6 +155,8 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
     setLiveState(null)
     setThinkingSecs(0)
     setThinkingNote(undefined)
+    setLivePlan(null)
+    setDelegations([])
     setActivity([])
     setLiveResult(null)
     setLiveQuota(false)
@@ -224,6 +229,16 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
         setThinkingSecs(ev.seconds)
         setThinkingNote(ev.note)
         break
+      case 'plan':
+        setLivePlan((prev) => prev ?? { steps: ev.steps, architecture: ev.architecture })
+        break
+      case 'delegation':
+        setDelegations((prev) => {
+          const map = new Map(prev.map((d) => [d.taskId, d]))
+          map.set(ev.taskId, { taskId: ev.taskId, title: ev.title, agent: ev.agent, status: ev.status })
+          return [...map.values()]
+        })
+        break
       case 'activity':
         setActivity((prev) => {
           const map = new Map(prev.map((a) => [a.id, a]))
@@ -256,12 +271,36 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
       if (liveRunIdRef.current !== runId) return
       try {
         const d = await api<{
-          run: { state: string; errorCode?: string | null; result?: unknown; startedAt: string }
+          run: {
+            state: string; errorCode?: string | null; result?: unknown; startedAt: string
+            plan?: { architecture?: unknown; tasks?: Array<{ title?: unknown; agentRole?: unknown }> } | null
+          }
           activity: Array<{ id: string; tool: string; status: string; createdAt: string; args?: Record<string, unknown> | null }>
+          tasks?: Array<{ id: string; title: string; agentRole: string; status: string; createdAt: string }>
           pendingQuestion?: { toolCallId: string; questions: unknown[] } | null
         }>(`/api/poskli/${runId}`)
         if (liveRunIdRef.current !== runId) return
         handleEvent({ type: 'state', state: d.run.state, label: friendlyRunState(d.run.state) })
+        // FASES VISÍVEIS no fallback polling (mesmos eventos do SSE):
+        // plano persistido + delegações das tarefas deste run
+        if (!isThinkingState(d.run.state) && Array.isArray(d.run.plan?.tasks) && (d.run.plan?.tasks?.length ?? 0) > 0) {
+          handleEvent({
+            type: 'plan',
+            steps: (d.run.plan?.tasks ?? []).slice(0, 8).map((t) => ({
+              title: typeof t?.title === 'string' ? t.title : String(t?.title ?? ''),
+              agent: chatAgentLabel(typeof t?.agentRole === 'string' ? t.agentRole : 'coding'),
+            })),
+            ...(typeof d.run.plan?.architecture === 'string' && d.run.plan.architecture
+              ? { architecture: d.run.plan.architecture }
+              : {}),
+          })
+        }
+        for (const t of d.tasks ?? []) {
+          if (t.status === 'CANCELLED') continue
+          // escopo do run: tarefas criadas APÓS o início deste run
+          if (new Date(t.createdAt).getTime() < new Date(d.run.startedAt).getTime() - 5_000) continue
+          handleEvent({ type: 'delegation', taskId: t.id, title: t.title, agent: chatAgentLabel(t.agentRole), status: t.status })
+        }
         if (isThinkingState(d.run.state)) {
           const seconds = Math.max(1, Math.round((Date.now() - new Date(d.run.startedAt).getTime()) / 1000))
           // guarda de travamento no fallback (mesma lógica do SSE)
@@ -577,7 +616,7 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
     if (!el) return
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200
     if (nearBottom) el.scrollTop = el.scrollHeight
-  }, [activity.length, liveResult, liveState?.label, messages.length, thinkingSecs, thinkingNote, clarify])
+  }, [activity.length, liveResult, liveState?.label, messages.length, thinkingSecs, thinkingNote, livePlan, delegations.length, clarify])
 
   const emptyConversation = !projectId && messages.length === 0 && !liveRunId && !clarify
 
@@ -646,16 +685,20 @@ export function ChatView({ projectId, prefill, onProjectCreated, onPrefillConsum
             </div>
           ))}
 
-          {/* turno ao vivo */}
+          {/* turno ao vivo — FASES VISÍVEIS: análise → plano → delegação → ações */}
           {activeRun && (
             <div className="space-y-2">
               <UserBubble text={liveUserMessage ?? ''} />
               {liveState && isThinkingState(liveState.state) && (
                 <ThinkingBubble seconds={thinkingSecs} note={thinkingNote} />
               )}
-              {liveState && !isThinkingState(liveState.state) && activity.length === 0 && (
+              {liveState && !isThinkingState(liveState.state) && !livePlan && delegations.length === 0 && activity.length === 0 && (
                 <StatusBubble label={liveState.label} />
               )}
+              {livePlan && <PlanBubble steps={livePlan.steps} architecture={livePlan.architecture} />}
+              {delegations.map((d) => (
+                <DelegationBubble key={d.taskId} title={d.title} agent={d.agent} status={d.status} />
+              ))}
               {activity.length > 0 && <ActivityCard entries={activity} running />}
               {liveQuota && <QuotaBubble />}
               {liveResult && <AgentBubble markdown={liveResult} />}
