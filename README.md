@@ -93,6 +93,18 @@ Todos os modelos são acessados por um **chain de providers** definido pela vers
 - **Correções via diff**: o agente de correção recebe apenas o **diff** (linhas alteradas) + erro resumido — nunca o código completo ou o histórico inteiro.
 - **Ciclos de revisão reduzidos**: `MAX_REVIEW_CYCLES` = **1** para tarefas simples, **2** para difíceis (jogos/apps complexas) — derivado do pedido automaticamente.
 
+### Reconstrução agêntica (Poskli como Claude Code / Codex)
+
+O Poskli comporta-se como um agente profissional de verdade — pergunta, executa, observa, decide; para honestamente quando não pode avançar:
+
+- **Interatividade real (`ask_user_question`)**: ambiguidade crítica (estilo, plataforma, escopo) → o agente **pergunta ao usuário** (modal no painel: até 4 perguntas, 2–4 opções com descrição) e o run **pausa** até a resposta. Sem resposta no prazo (`USER_QUESTION_TIMEOUT_MS`, default 120s), prossegue com a opção mais conservadora **documentada** — nunca fica preso. Resposta via `POST /api/poskli/:id/answer`; canal de resposta em `ToolCall` (sem migrations).
+- **Loop-guard de plano (anti-loop)**: além do detector por ação, o orquestrador **para honestamente** com `LOOP_DETECTADO` quando (a) as falhas de testes têm a **mesma assinatura** 2× seguidas após correção, ou (b) a correção aplicada **não alterou nenhum arquivo** (diff vazio). Nunca queima tokens em ciclos sem progresso.
+- **Compactação automática a 75% da janela** (`CONTEXT_WINDOW_TOKENS`): quando o contexto atinge 75%, o histórico antigo é substituído por um **estado estruturado** (arquivos já tocados com "NÃO refazer", execuções de teste, progresso, última tool) — o antídoto ao bug clássico de compactação que transforma trabalho concluído em pendente e faz o agente repetir tudo.
+- **Checkpoints git por ação (reversibilidade estilo Codex)**: após cada tarefa implementada, cada correção aplicada e antes da verificação final, o workspace recebe um commit `poskli-*` — qualquer passo do agente é **reversível com git** (pontos de restauração listados nas evidências do run).
+- **Validação Godot headless (`godot_check`)**: pedidos de jogos geram **projetos Godot 4 reais** (`project.godot`, cenas `.tscn`, scripts `.gd`) — não jogos JS de browser. A tool valida a compilação com `godot --headless --path . --check-only` (parse) ou `--quit-after N` (smoke de frames). Se a CLI não existir no executor (ex.: serverless), o retorno é **honesto** (`GODOT_INDISPONÍVEL`) — o agente nunca finge que validou; os testes estruturais node:test rodam em qualquer executor.
+- **Atividade ao vivo no painel**: ações dos agentes traduzidas para linguagem de produto ("A criar arquivo…", "A executar testes…", "A validar o jogo (Godot)…", "Aguardando sua resposta…") — o usuário vê o que o agente está a fazer agora, sem jargão.
+- **Modos amigáveis no seletor**: o painel mostra **Normal · Padrão · Avançado · Superagente** (papéis, sem nomes técnicos de modelos — os "níveis" 0.1/0.2/… continuam internos para o backend; `1.0-flash` permanece acessível via `POSKLI_VERSION` mas fora do seletor).
+
 - **B.AI** (`BAI_API_KEY_1`/`BAI_API_KEY_2`) com **BAIKeyManager** — failover controlado:
 
 - `KEY 1` → falha **elegível** (rede, 5xx, timeout, 401) → `KEY 2` → ambas falham → **erro controlado**;

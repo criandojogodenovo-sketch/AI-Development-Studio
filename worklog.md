@@ -520,3 +520,40 @@ Stage Summary:
 - tsc: zero erros novos (12 pré-existentes documentados; ignoreBuildErrors já ativo)
 - eslint: limpo nos ficheiros alterados (public/monaco/** adicionado ao ignores — OOM)
 - next build: OK (todas as rotas)
+
+---
+
+## Tarefa D — Reconstrução agêntica (Poskli como Claude Code/Codex), 2026-09-07
+
+**Contexto**: o Poskli gastava tokens em loops e nunca perguntava. Reconstrução para comportamento de agente profissional: executa → observa → decide; pergunta quando há ambiguidade; para honestamente.
+
+### 1. Interatividade real — ask_user_question
+- Tool (master+coding): até 4 perguntas × 2-4 opções (JSON string, parse puro com fallback textual "pergunta|A|B")
+- Canal de resposta: ToolCall PENDING (ZERO migrations) → modal no painel → POST /api/poskli/[id]/answer → status ANSWERED → polling da tool (2s) devolve ao LLM
+- Timeout honesto USER_QUESTION_TIMEOUT_MS (default 120s): prossegue com opção conservadora DOCUMENTADA; cancelamento do run interrompe a espera
+
+### 2. Godot headless — godot_check
+- jogos → projetos Godot 4 reais (project.godot/.tscn/.gd; prompts master/coding/testing)
+- check: `godot --headless --path . --check-only`; run: `--quit-after N`; allowlist + binário godot
+- capability detection: CLI ausente → GODOT_INDISPONÍVEL honesto (nunca simula); testes estruturais node:test rodam em qualquer executor
+- verifyPreview: project.godot → preview web NOT_APPLICABLE
+
+### 3. Compactação a 75% preservando ESTADO
+- context/compaction.ts (puro): estimateTokens/shouldAutoCompact/compactConversation
+- estado estruturado: arquivos tocados ("NÃO refazer"), testRuns+última PASS/FAIL, progresso, última tool
+- AgentRunner aplica antes de cada chamada ao modelo (window 128k default, ratio 0.75, últimos 6 turnos)
+
+### 4. Loop-guard de plano + checkpoints git
+- loop-guard.ts (puro): failureSignature (normalizada, tempos ignorados) + shouldStopCorrectionCycle
+- SAME_FAILURE (2x seguidas) ou NO_REPO_CHANGE (diff vazio pós-correção) → LOOP_DETECTADO + break honesto
+- checkpointWorkspace: commit poskli-* após cada tarefa implementada, cada correção e antes da verificação final (hash nas evidências)
+- BUG PRÉ-EXISTENTE CORRIGIDO: workspaceDiffSummary usava pipe `|` — allowlist sem shell SEMPRE rejeitava (a §3e nunca funcionou); agora `git diff --unified=1 HEAD` + clip 2k
+
+### 5. UI amigável
+- Seletor: Normal / Padrão / Avançado / Superagente (papéis, zero nomes técnicos; values 0.1/0.2/0.3.1/superagent; 1.0-flash env-only)
+- Atividade ao vivo: toolCalls → "A criar arquivo…", "A executar testes…", "A validar o jogo (Godot)…", "Aguardando sua resposta…"
+- Modal de pergunta (opções clicáveis + resposta livre)
+
+### 6. Testes: 134/134 (+21)
+- question-format 6 · compaction 5 · loop-guard 5 · activity+modes+godot-format 5 (4 suites novas)
+- tsc: 13 erros pré-existentes, ZERO novos · eslint limpo · next build EXIT 0 (rota /api/poskli/[id]/answer no output)
