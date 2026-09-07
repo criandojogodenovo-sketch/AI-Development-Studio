@@ -7,6 +7,7 @@
 
 import { db } from '@/lib/db'
 import { emitEvent } from '../events/bus'
+import { taskText, taskTitle } from './task-text.ts'
 
 export const TASK_STATUSES = ['PENDING', 'RUNNING', 'BLOCKED', 'FAILED', 'REVIEWING', 'COMPLETED', 'CANCELLED'] as const
 export type TaskStatus = (typeof TASK_STATUSES)[number]
@@ -32,13 +33,16 @@ export async function createTasksFromPlan(
 
   const planTasks = plan.tasks.slice(0, 20)
   // 1) cria todas as tarefas (dependencies vazias por ora)
+  // NORMALIZAÇÃO (bug de serialização): title/description podem
+  // vir como OBJETO do plano do LLM — taskText achat em texto
+  // legível (nunca "[object Object]").
   for (const t of planTasks) {
     const task = await db.task.create({
       data: {
         projectId,
         order: ids.length,
-        title: String(t.title).slice(0, 200),
-        description: String(t.description).slice(0, 4000),
+        title: taskTitle(t.title, ids.length).slice(0, 200),
+        description: taskText(t.description).trim().slice(0, 4000),
         status: 'PENDING',
         priority: validPriorities.has(t.priority) ? t.priority : 'MEDIUM',
         agentRole: validRoles.has(t.agentRole) ? t.agentRole : 'coding',
@@ -119,7 +123,8 @@ export async function projectProgress(projectId: string) {
         maxAttempts: t.maxAttempts,
         dependencies: (t.dependencies as unknown as string[]) ?? [],
         error: t.error,
-        // Saída final do agente (resumo/evidências) — renderizada como Markdown na UI
+        // Saída final do agente (resumo/evidências) — renderizada como Markdown na UI.
+        // DEFESA: nunca devolver o objeto cru para o frontend.
         result:
           resultJson && typeof resultJson === 'object' && typeof resultJson.output === 'string'
             ? resultJson.output.slice(0, 4000)

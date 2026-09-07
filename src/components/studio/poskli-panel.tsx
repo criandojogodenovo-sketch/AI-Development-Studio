@@ -119,8 +119,22 @@ interface PoskliRunInfo {
 }
 
 interface TaskInfo {
-  id: string; order: number; title: string; status: string; agentRole: string
+  id: string; order: number; title: string; description?: string; status: string; agentRole: string
   attempts: number; maxAttempts: number; error?: string; result?: string
+}
+
+/** DEFESA DE SERIALIZAÇÃO: nunca renderizar objetos crus —
+ *  extrai .output (formato do DB) ou JSON legível. */
+function safeText(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (v === null || v === undefined) return ''
+  if (typeof v === 'object') {
+    const o = v as { output?: unknown; result?: unknown }
+    if (typeof o.output === 'string') return o.output
+    if (typeof o.result === 'string') return o.result
+    try { return JSON.stringify(v) } catch { return '' }
+  }
+  return String(v)
 }
 
 interface ExecutionInfo {
@@ -708,8 +722,11 @@ export function PoskliPanel({ projectId, prefill }: { projectId: string; prefill
                         </div>
                         {expandedTask === t.id && (
                           <div className="mt-1.5 pl-7 space-y-1.5">
-                            {t.error && <p className="text-[10px] text-red-400/90 break-words">{t.error}</p>}
-                            {t.result && <Markdown content={String(t.result).slice(0, 1500)} compact />}
+                            {t.description && (
+                              <p className="text-[10px] text-zinc-500 break-words leading-relaxed">{safeText(t.description)}</p>
+                            )}
+                            {t.error && <p className="text-[10px] text-red-400/90 break-words">{safeText(t.error)}</p>}
+                            {t.result && <Markdown content={safeText(t.result).slice(0, 1500)} compact />}
                           </div>
                         )}
                       </button>

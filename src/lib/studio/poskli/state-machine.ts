@@ -13,8 +13,10 @@
 //   - Nunca deriva sucesso de um único boolean (npm test)
 //
 // Estados globais: SUCCESS | FAILED | BLOCKED | PARTIAL | CANCELLED
-// Fases operacionais: ANALYZING → PLANNING → IMPLEMENTING →
-//   TESTING → (CORRECTING → TESTING)* → REVIEWING → VERIFYING
+// Fases operacionais (reconstrução agêntica — o loop principal é
+//   ANALYZING → PLANNING → IMPLEMENTING ⇄ TESTING → VERIFYING;
+//   CORRECTING/REVIEWING permanecem no tipo apenas para compat.
+//   de runs ANTIGOS persistidos no DB)
 // ============================================================
 
 // ---------- TIPOS (erasable-only: sem enums) ----------
@@ -463,7 +465,7 @@ function constCriteria(input: DeriveFinalStatusInput): Criterion[] {
       id: 'review',
       label: 'Revisão',
       status: 'PASS',
-      evidence: 'revisão dispensada por política',
+      evidence: 'verificação agêntica por testes reais (revisão dedicada dispensada)',
     })
   } else {
     switch (input.review.status) {
@@ -656,6 +658,6 @@ export function reviewStatusLabel(status: ReviewStatus): string {
     case 'CHANGES_REQUESTED': return 'solicitou mudanças'
     case 'FAILED': return 'reprovada'
     case 'BLOCKED': return 'bloqueada'
-    default: return 'não executada'
+    default: return 'dispensada (verificação por testes)'
   }
 }

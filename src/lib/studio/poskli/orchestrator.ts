@@ -3,22 +3,25 @@
 //
 // USER → POSKLI ORCHESTRATOR (CONTROLADO)
 //        → PLANNER (análise/plano)
-//        → ENGINEER/Qwen (implementação)
-//        → TESTER (testes REAIS no Execution Engine)
-//        → REVIEWER/HY3 (revisão com evidências)
-//        → CORRECTION (alimentada pela SAÍDA REAL dos testes)
+//        → ENGINEER (implementação — LOOP AGÊNTICO: o agente
+//          decide rodar testes, vê o output e edita arquivos
+//          DIRETAMENTE, sem etapas fixas de Revisar/Corrigir)
+//        → TESTES REAIS no Execution Engine (giro canônico)
+//        → (se falhar: o MESMO agente edita + re-testa, teto 2)
 //        → FINAL VERIFICATION (checklist determinístico)
 //        → deriveFinalStatus()  ← FONTE ÚNICA DA VERDADE
 //
 // REGRA ABSOLUTA (0.2):
 //   "CONCLUÍDO" somente quando deriveFinalStatus() derivar SUCCESS
-//   dos critérios REAIS (tarefas/testes/revisão/correções/verificação).
+//   dos critérios REAIS (tarefas/testes/correções/verificação).
 //   Terminou de executar ≠ concluiu. NUNCA mascarar erro como sucesso.
 //
-// Estados visíveis ao usuário:
-//   ANALYZING → PLANNING → IMPLEMENTING → TESTING →
-//   (CORRECTING → TESTING)* → REVIEWING → VERIFYING →
+// Estados visíveis ao usuário (reconstrução agêntica — sem
+// "Revisando"/"Corrigindo" como etapas separadas):
+//   ANALYZING → PLANNING → IMPLEMENTING ⇄ TESTING → VERIFYING →
 //   COMPLETED | FAILED | BLOCKED | PARTIAL | CANCELLED
+//   (CORRECTING/REVIEWING existem apenas p/ compatibilidade de
+//   runs ANTIGOS persistidos no DB)
 // ============================================================
 
 import { db } from '@/lib/db'
@@ -41,10 +44,11 @@ import {
   type DeriveFinalStatusInput, type DeriveFinalStatusResult, type TaskSnapshot,
   type TestRecordSnapshot, type CorrectionSnapshot, type ReviewSnapshot, type VerificationResult,
 } from './state-machine'
-import { classifyError, rateLimitRecord, type PoskliErrorCode } from './errors'
+import { classifyError, type PoskliErrorCode } from './errors'
 import { withPoskliVersion } from '../models/version-context.ts'
 import { POSKLI_VERSIONS } from '../models/chain.ts'
-import { failureSignature, shouldStopCorrectionCycle } from './loop-guard.ts'
+import { failureSignature, agenticFixBudget, agenticFixDecision } from './loop-guard.ts'
+import { taskText } from '../orchestrator/task-text.ts'
 
 // ---------- TIPOS ----------
 
@@ -93,11 +97,13 @@ interface CorrectionRecord extends CorrectionSnapshot {
   errorCode?: PoskliErrorCode
 }
 
-/** Snapshot da revisão (spec §5/§13) — persistido em run.reviewResult. */
+/** Snapshot da revisão (spec §5/§13) — persistido em run.reviewResult.
+ *  MODO AGÊNTICO: a revisão dedicada foi DESPENSADA — o campo
+ *  permanece (coluna no DB + derivação) marcado como NOT_RUN e a
+ *  derivação recebe reviewRequired=false. */
 interface ReviewResult extends ReviewSnapshot {
   issues?: unknown[]
   summary?: string
-  rateLimit?: ReturnType<typeof rateLimitRecord>
   ts?: string
 }
 
@@ -112,8 +118,6 @@ interface PoskliContext {
   executions: number
   iteration: number
   maxIterations: number
-  /** Teto de ciclos de correção (Tarefa C §3f): 1 simples / 2 difícil */
-  maxCycles: number
   evidence: string[]
   plan: Plan
   /** Registros com identidade (nunca duplicados por re-render/polling). */
@@ -127,21 +131,7 @@ interface PoskliContext {
 }
 
 const MAX_TASKS = 8
-const MAX_REVIEW_ATTEMPTS = 2
 const FILE_WRITE_TOOLS = ['create_file', 'modify_file', 'create_directory']
-
-/**
- * Deriva a dificuldade da tarefa (Tarefa C §3f): tarefas difíceis
- * (jogos, apps complexas, dashboards, tempo real, muitas tarefas)
- * ganham 2 ciclos de revisão; simples, 1. Economia de tokens.
- */
-function deriveDifficulty(request: string, taskCount: number): 'easy' | 'hard' {
-  const hard =
-    /\b(jogo|game|jogos|games|aplicativo|app\b|dashboard|painel|3d|multiplayer|engine|motor\b|plataforma|e-?commerce|loja|chat|tempo real|realtime|sistema completo)\b/i.test(
-      request
-    ) || taskCount > 6
-  return hard ? 'hard' : 'easy'
-}
 
 /** Cota esgotada (Tarefa C §3a): o run PARA honestamente — o catch
  *  do runPoskliInner deriva o estado final conservador. NUNCA cria
@@ -406,7 +396,15 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
       ],
     }
   }
-  plan.tasks = plan.tasks.slice(0, MAX_TASKS)
+  // NORMALIZAÇÃO (bug de serialização): o LLM pode devolver
+  // description/title como objetos — achatamos em texto legível
+  // ANTES de persistir e de montar prompts.
+  plan.tasks = plan.tasks.slice(0, MAX_TASKS).map((t) => ({
+    ...t,
+    title: taskText(t.title) || t.title,
+    description: taskText(t.description),
+    dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn : [],
+  }))
   return plan
 }
 
@@ -499,155 +497,6 @@ async function runTestsStage(ctx: PoskliContext, trigger: TestRecord['trigger'])
   return { passed, executionId: res.executionId, command, stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode, status: res.status }
 }
 
-/**
- * REVIEWING com classificação de erros e política de rate limit (spec §13).
- * - BAI_RATE_LIMIT → revisão BLOCKED (failover NÃO aplicado por política)
- *   → registrado objetivamente; NUNCA vira sucesso.
- * - Timeout/erro transitório → 1 retry (limite MAX_REVIEW_ATTEMPTS).
- */
-async function reviewStage(ctx: PoskliContext): Promise<ReviewResult> {
-  const reviewAgent = getAgent('review')!
-  const root = await ensureMaterialized(ctx.projectId)
-  let attempts = 0
-  let lastRaw = ''
-
-  for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
-    attempts = attempt
-    const out = await runAgent(
-      {
-        agent: reviewAgent,
-        projectId: ctx.projectId,
-        workspaceRoot: root,
-        runType: 'REVIEW',
-        poskliRunId: ctx.runId,
-        objective: [
-          `Revise a implementação do pedido: "${ctx.request.slice(0, 300)}"`,
-          '',
-          `Evidências coletadas:\n${ctx.evidence.slice(-6).map((e) => `- ${e}`).join('\n')}`,
-          '',
-          'Verifique com evidências reais (git_diff, run_tests, leitura de arquivos) e emita veredito JSON:',
-          '{"verdict": "APPROVE" | "CHANGES_REQUESTED", "issues": [...], "summary": "..."}',
-        ].join('\n'),
-        contextBlock: '',
-      },
-      16
-    )
-    ctx.tokens.in += out.tokensIn
-    ctx.tokens.out += out.tokensOut
-    ctx.agentRunIds.push(out.runId)
-    lastRaw = out.result
-
-    if (out.status === 'COMPLETED') {
-      const verdictJson = extractJson(out.result)
-      const verdict = String(verdictJson?.verdict ?? (out.result.includes('APPROVE') ? 'APPROVE' : 'CHANGES_REQUESTED'))
-      const issues = (verdictJson?.issues as unknown[]) ?? []
-      const result: ReviewResult = {
-        status: verdict === 'APPROVE' ? 'PASS' : 'CHANGES_REQUESTED',
-        verdict,
-        issues,
-        summary: out.result.slice(0, 600),
-        attempts,
-        ts: new Date().toISOString(),
-      }
-      await emitEvent({
-        type: verdict === 'APPROVE' ? 'review.approved' : 'review.changes_requested',
-        projectId: ctx.projectId,
-        runId: ctx.runId,
-        agent: 'review',
-        status: verdict,
-        message: verdict === 'APPROVE' ? 'Revisão aprovou a implementação' : 'Revisão solicitou mudanças',
-        data: { attempt, issues: issues.length },
-      })
-      return result
-    }
-
-    // ---- agente falhou: CLASSIFICAR (nunca mascarar) ----
-    const classified = classifyError(`${out.error ?? ''} ${out.result}`)
-
-    if (classified.code === 'QUOTA_EXHAUSTED') {
-      // Tarefa C §3a: cota esgotada → revisão BLOCKED + run ABORTADO
-      const blocked: ReviewResult = {
-        status: 'BLOCKED',
-        verdict: 'BLOCKED',
-        blockedReason: 'QUOTA_EXHAUSTED',
-        summary: 'Revisão bloqueada: cota do provedor esgotada (run interrompido para evitar desperdício).',
-        attempts,
-        ts: new Date().toISOString(),
-      }
-      ctx.errorCode = 'QUOTA_EXHAUSTED'
-      ctx.evidence.push('Revisão bloqueada: QUOTA_EXHAUSTED — run interrompido honestamente')
-      await emitEvent({
-        type: 'review.blocked',
-        projectId: ctx.projectId,
-        runId: ctx.runId,
-        agent: 'review',
-        status: 'BLOCKED',
-        message: 'Revisão bloqueada: cota do provedor esgotada — o run será interrompido sem correções automáticas',
-        data: { code: 'QUOTA_EXHAUSTED', attempt },
-      })
-      await db.poskliRun.update({ where: { id: ctx.runId }, data: { reviewResult: blocked as unknown as object } }).catch(() => {})
-      throw new QuotaExhaustedAbort('revisão interrompida por cota esgotada')
-    }
-
-    if (classified.code === 'PROVIDER_RATE_LIMIT') {
-      // Política: failover NÃO aplicado a rate limits → revisão BLOCKED
-      const rl = rateLimitRecord('REVIEWING', attempt, 'key#1', false, 'revisão bloqueada — sem failover para rate limit por política')
-      const blocked: ReviewResult = {
-        status: 'BLOCKED',
-        verdict: 'BLOCKED',
-        blockedReason: 'PROVIDER_RATE_LIMIT',
-        summary: 'Revisão bloqueada: limite de requisições do provedor de IA atingido.',
-        attempts,
-        rateLimit: rl,
-        ts: new Date().toISOString(),
-      }
-      ctx.errorCode = 'PROVIDER_RATE_LIMIT'
-      ctx.evidence.push('Revisão bloqueada: BAI_RATE_LIMIT (política: sem failover para rate limits)')
-      await emitEvent({
-        type: 'review.blocked',
-        projectId: ctx.projectId,
-        runId: ctx.runId,
-        agent: 'review',
-        status: 'BLOCKED',
-        message: 'Revisão bloqueada: limite de requisições do provedor — o resultado não será concluído sem revisão',
-        data: { code: 'PROVIDER_RATE_LIMIT', attempt, policy: rl.policy, retried: false },
-      })
-      return blocked
-    }
-
-    if (!classified.retryable || attempt >= MAX_REVIEW_ATTEMPTS) {
-      const failed: ReviewResult = {
-        status: 'FAILED',
-        verdict: 'FAILED',
-        summary: classified.friendly,
-        attempts,
-        ts: new Date().toISOString(),
-      }
-      ctx.errorCode = classified.code
-      ctx.evidence.push(`Revisão falhou: ${classified.code}`)
-      await emitEvent({
-        type: 'review.failed',
-        projectId: ctx.projectId,
-        runId: ctx.runId,
-        agent: 'review',
-        status: 'FAILED',
-        message: 'Não foi possível concluir a revisão — o resultado não será concluído sem revisão',
-        data: { code: classified.code, attempt },
-      })
-      return failed
-    }
-    // retryable → tentativa 2 (registrada)
-    ctx.evidence.push(`Revisão: tentativa ${attempt} falhou (${classified.code}) — reagindo com retry limitado`)
-  }
-
-  return {
-    status: 'FAILED',
-    verdict: 'FAILED',
-    summary: `Revisão não concluída após ${attempts} tentativas. ${lastRaw.slice(0, 200)}`,
-    attempts,
-    ts: new Date().toISOString(),
-  }
-}
 
 async function verifyPreview(ctx: PoskliContext): Promise<boolean> {
   const project = await db.project.findUnique({ where: { id: ctx.projectId }, select: { type: true } })
@@ -816,8 +665,6 @@ async function runPoskliInner(runId: string): Promise<void> {
     executions: 0,
     iteration: 0,
     maxIterations: run.maxIterations,
-    // Tarefa C §3f: ciclos de correção por dificuldade (1 simples / 2 difícil)
-    maxCycles: STUDIO_CONFIG.limits.reviewCyclesSimple,
     evidence: [],
     plan: { architecture: '', stack: [], tasks: [] },
     testRecords: [],
@@ -841,12 +688,6 @@ async function runPoskliInner(runId: string): Promise<void> {
     if (!(await setState(ctx, 'PLANNING'))) return
     let totalTasks = 0
     await stage(ctx, 'PLANNING', async () => {
-      // dificuldade da tarefa → teto de ciclos de correção (§3f)
-      const difficulty = deriveDifficulty(ctx.request, ctx.plan.tasks.length)
-      ctx.maxCycles =
-        difficulty === 'hard'
-          ? Math.max(STUDIO_CONFIG.limits.reviewCyclesSimple, STUDIO_CONFIG.limits.maxReviewCycles)
-          : STUDIO_CONFIG.limits.reviewCyclesSimple
       await db.task.updateMany({
         where: { projectId: ctx.projectId, status: { in: ['PENDING', 'BLOCKED', 'FAILED', 'RUNNING'] } },
         data: { status: 'CANCELLED', error: null },
@@ -854,7 +695,7 @@ async function runPoskliInner(runId: string): Promise<void> {
       const ids = await createTasksFromPlan(ctx.projectId, ctx.plan)
       totalTasks = ids.length
       await db.poskliRun.update({ where: { id: runId }, data: { plan: { tasks: ctx.plan.tasks, architecture: ctx.plan.architecture } as object } })
-      return `Grafo pronto: ${totalTasks} tarefa(s) · ciclos máx ${ctx.maxCycles} (${difficulty})`
+      return `Grafo pronto: ${totalTasks} tarefa(s) · loop agêntico (teto de ${agenticFixBudget(ctx.maxIterations, STUDIO_CONFIG.agentic.maxFixAttempts)} edições)`
     })
 
     // 3) IMPLEMENTING — Engenheiro executa as tarefas (com retry interno limitado)
@@ -919,37 +760,44 @@ async function runPoskliInner(runId: string): Promise<void> {
     let tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'INITIAL'))
     let testPassed = tests.passed
 
-    // 5) CORRECTING ← TESTING — loop limitado por maxCycles (Tarefa C
-    // §3f: 1 ciclo p/ simples, 2 p/ difíceis) + orçamento de tempo +
-    // LOOP-GUARD de plano (reconstrução agêntica): para honestamente
-    // quando as correções não estão resolvendo (mesma assinatura de
-    // falha) ou quando não produzem mudanças no repositório.
+    // 5) LOOP AGÊNTICO (reconstrução — sem etapas "Corrigindo"/"Revisando"):
+    //    se os testes falharam, o MESMO agente vê o erro e edita os
+    //    arquivos DIRETAMENTE (estilo Claude Code/Codex). O estado
+    //    visível alterna IMPLEMENTING ⇄ TESTING — nunca entra em
+    //    CORRECTING/REVIEWING. Teto: 2 rodadas de edição + loop-guard
+    //    (mesma assinatura de falha / repo sem mudanças) + orçamento.
     const failureSignatures: string[] = []
     if (!tests.passed) failureSignatures.push(failureSignature(tests.stdout, tests.stderr))
-    const cycleBudget = Math.min(ctx.maxIterations, ctx.maxCycles)
-    while (!testPassed && ctx.iteration < cycleBudget && Date.now() < ctx.deadline - 15_000) {
-      // ---- LOOP-GUARD: mesma falha persistindo após correção anterior? ----
-      const guard = shouldStopCorrectionCycle({
+    const fixBudget = agenticFixBudget(ctx.maxIterations, STUDIO_CONFIG.agentic.maxFixAttempts)
+    let repoChangedAfterFix: boolean | null = null
+    while (!testPassed && Date.now() < ctx.deadline - 15_000) {
+      const decision = agenticFixDecision({
+        fixAttempts: ctx.iteration,
+        fixBudget,
         sameSignatures: failureSignatures,
-        repoChangedAfterCorrection: null,
+        repoChangedAfterFix,
       })
-      if (guard.stop) {
-        ctx.evidence.push(guard.message)
+      if (!decision.continueFix) {
+        ctx.evidence.push(decision.message)
         await emitEvent({
           type: 'correction.stopped',
           projectId: ctx.projectId,
           runId: ctx.runId,
           status: 'BLOCKED',
-          message: 'Loop detectado — ciclos de correção interrompidos para poupar tokens',
-          data: { reason: guard.reason },
+          message:
+            decision.reason === 'FIX_BUDGET_EXHAUSTED'
+              ? `O agente parou após ${ctx.iteration} rodada(s) de edição (teto ${fixBudget}) — reportando o estado real`
+              : 'Loop detectado — edições interrompidas para poupar tokens',
+          data: { reason: decision.reason ?? 'LOOP_GUARD', fixAttempts: ctx.iteration, fixBudget },
         })
         break
       }
       ctx.iteration++
-      if (!(await setState(ctx, 'CORRECTING'))) return
+      // o agente EDITA arquivos diretamente → estado visível IMPLEMENTING
+      if (!(await setState(ctx, 'IMPLEMENTING'))) return
       const record = await startCorrection(ctx, 'TEST_FAILURE')
       let repoChanged: boolean | null = null
-      await stage(ctx, 'CORRECTING', async () => {
+      await stage(ctx, 'IMPLEMENTING', async () => {
         // Tarefa C §3e: correção via DIFF + erro resumido — nunca o código completo
         const failureHints = clipToolOutput(extractFailureHints(tests.stdout, tests.stderr))
         const diff = await workspaceDiffSummary(ctx)
@@ -963,29 +811,30 @@ async function runPoskliInner(runId: string): Promise<void> {
             '## DIFF DO ESTADO ATUAL (linhas alteradas)',
             diff,
             '',
-            'Corrija APENAS as linhas que causam a falha: use modify_file com trechos pequenos (searchText/replaceText). NÃO reescreva arquivos inteiros nem reenvie código completo.',
+            'Edite DIRETAMENTE as linhas que causam a falha: use modify_file com trechos pequenos (searchText/replaceText). NÃO reescreva arquivos inteiros nem reenvie código completo.',
           ].join('\n')
         )
-        // LOOP-GUARD: a correção alterou o repositório?
+        // LOOP-GUARD: a edição alterou o repositório?
         repoChanged = await workspaceHasChanges(ctx)
+        repoChangedAfterFix = repoChanged
         const rec = ctx.corrections.find((c) => c.id === record.id)
-        // checkpoint da correção aplicada (reversível)
+        // checkpoint da edição aplicada (reversível)
         if (rec?.state === 'COMPLETED') await checkpointWorkspace(ctx, `fix-${record.attempt}`)
-        return rec ? `Correção #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`
+        return rec ? `Edição agêntica #${record.attempt}: ${rec.state}` : `Edição agêntica #${record.attempt}`
       })
       await db.poskliRun.update({ where: { id: runId }, data: { iteration: ctx.iteration } }).catch(() => {})
 
-      // LOOP-GUARD: correção sem mudanças no repo → parar honestamente
+      // edição sem mudanças no repo → parar honestamente
       if (repoChanged === false) {
-        const guard = shouldStopCorrectionCycle({ sameSignatures: [], repoChangedAfterCorrection: false })
-        ctx.evidence.push(guard.message)
+        const guardMsg = 'LOOP_DETECTADO: a edição não alterou nenhum arquivo — o agente está repetindo raciocínio sem produzir mudanças.'
+        ctx.evidence.push(guardMsg)
         await emitEvent({
           type: 'correction.stopped',
           projectId: ctx.projectId,
           runId: ctx.runId,
           status: 'BLOCKED',
-          message: 'Loop detectado: a correção não alterou nenhum arquivo — ciclos interrompidos',
-          data: { reason: guard.reason, correctionId: record.id },
+          message: 'Loop detectado: a edição não alterou nenhum arquivo — interrompido',
+          data: { reason: 'NO_REPO_CHANGE', correctionId: record.id },
         })
         break
       }
@@ -996,44 +845,9 @@ async function runPoskliInner(runId: string): Promise<void> {
       if (!testPassed) failureSignatures.push(failureSignature(tests.stdout, tests.stderr))
     }
 
-    // 6) REVIEWING — Revisor de Qualidade (classifica rate limit; nunca mascara)
-    if (!(await setState(ctx, 'REVIEWING'))) return
-    ctx.review = await stage(ctx, 'REVIEWING', () => reviewStage(ctx))
-    await db.poskliRun.update({ where: { id: runId }, data: { reviewResult: ctx.review as unknown as object } }).catch(() => {})
-
-    // Revisor pediu mudanças → correção registrada (se houver orçamento
-    // de ciclos — Tarefa C §3f) e via DIFF (§3e)
-    if (
-      ctx.review.status === 'CHANGES_REQUESTED' &&
-      Date.now() < ctx.deadline - 40_000 &&
-      ctx.iteration < cycleBudget
-    ) {
-      ctx.iteration++
-      if (await setState(ctx, 'CORRECTING')) {
-        const record = await startCorrection(ctx, 'REVIEW_CHANGES')
-        await stage(ctx, 'CORRECTING', async () => {
-          const diff = await workspaceDiffSummary(ctx)
-          await applyCorrection(ctx, record, async () =>
-            [
-              '## REVISÃO SOLICITOU MUDANÇAS (resumo)',
-              (ctx.review.summary ?? '').slice(0, 400),
-              '',
-              '## DIFF DO ESTADO ATUAL (linhas alteradas)',
-              diff,
-              '',
-              'Aplique APENAS as correções apontadas (modify_file com trechos pequenos). NÃO reescreva arquivos inteiros.',
-            ].join('\n')
-          )
-          const rec = ctx.corrections.find((c) => c.id === record.id)
-          if (rec?.state === 'COMPLETED') await checkpointWorkspace(ctx, `review-fix-${record.attempt}`)
-          return rec ? `Correção pós-revisão #${record.attempt}: ${rec.state}` : `Correção #${record.attempt}`
-        })
-        if (await setState(ctx, 'TESTING')) {
-          tests = await stage(ctx, 'TESTING', () => runTestsStage(ctx, 'POST_REVIEW'))
-          testPassed = tests.passed
-        }
-      }
-    }
+    // (6) SEM etapa REVIEWING — modo agêntico: a verificação de
+    // qualidade vem dos TESTES REAIS + checklist determinístico.
+    // A derivação final recebe reviewRequired=false.
 
     // checkpoint final antes da verificação (estado completo é reversível)
     await checkpointWorkspace(ctx, 'final')
@@ -1090,7 +904,9 @@ async function runPoskliInner(runId: string): Promise<void> {
       corrections: ctx.corrections,
       verification,
       testsRequired: true,
-      reviewRequired: true,
+      // modo agêntico: sem etapa de revisão dedicada — a qualidade
+      // é verificada pelos TESTES REAIS + checklist determinístico
+      reviewRequired: false,
     } satisfies DeriveFinalStatusInput)
     await persistFinalResult(ctx, derivation, started)
   } catch (e) {
@@ -1108,7 +924,7 @@ async function runPoskliInner(runId: string): Promise<void> {
         corrections: ctx.corrections,
         verification: null,
         testsRequired: true,
-        reviewRequired: true,
+        reviewRequired: false, // modo agêntico (sem revisão dedicada)
       } satisfies DeriveFinalStatusInput)
       await persistFinalResult(ctx, derivation, started, classified)
     } catch {

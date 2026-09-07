@@ -155,3 +155,36 @@ export function formatUserAnswers(answers: UserAnswer[]): string {
     .map((a) => `- ${a.header ? `${a.header}: ` : ''}${String(a.answer ?? '').trim().slice(0, 400)}`)
     .join('\n')
 }
+
+// ============================================================
+// DECISÃO DO LOOP DE ESPERA (núcleo puro — testável)
+// A tool ask_user_question BLOQUEIA o agente até a resposta:
+// cada volta do polling decide com base no estado da ToolCall,
+// no estado do run e no prazo. Estas regras puras garantem:
+//   - PENDING + dentro do prazo     → WAIT (o loop continua)
+//   - ANSWERED                       → ANSWER (resposta ao LLM)
+//   - run CANCELLED                  → CANCELLED (aborta)
+//   - prazo esgotado sem resposta    → TIMEOUT (prossegue
+//     com a opção mais conservadora documentada)
+// ============================================================
+
+export type QuestionPollAction = 'WAIT' | 'ANSWER' | 'TIMEOUT' | 'CANCELLED'
+
+export interface QuestionPollInput {
+  /** status atual da ToolCall (PENDING | ANSWERED | …) */
+  toolCallStatus: string
+  /** estado do run Poskli ('CANCELLED' aborta a espera) */
+  runState?: string | null
+  /** epoch ms atual */
+  now: number
+  /** epoch ms limite da janela de espera */
+  deadline: number
+}
+
+export function nextQuestionPollAction(input: QuestionPollInput): QuestionPollAction {
+  if (input.runState === 'CANCELLED') return 'CANCELLED'
+  if (input.toolCallStatus === 'ANSWERED') return 'ANSWER'
+  if (input.toolCallStatus === 'TIMEOUT' || input.toolCallStatus === 'CANCELLED') return 'TIMEOUT'
+  if (input.now >= input.deadline) return 'TIMEOUT'
+  return 'WAIT'
+}

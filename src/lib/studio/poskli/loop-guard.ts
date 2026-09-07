@@ -74,3 +74,62 @@ export function shouldStopCorrectionCycle(input: {
   }
   return { stop: false, reason: '', message: '' }
 }
+
+// ============================================================
+// LOOP AGÊNTICO (substitui o pipeline fixo Corrigindo/Revisando)
+// Estilo Claude Code/Codex: o agente vê o output dos testes e
+// edita os arquivos DIRETAMENTE. O orquestrador apenas limita
+// o número de rodadas de edição e detecta loops.
+// ============================================================
+
+/** Teto de rodadas de edição após falha de testes (spec: 2). */
+export const MAX_FIX_ATTEMPTS = 2
+
+/**
+ * Orçamento efetivo de correções agênticas: o menor entre o teto
+ * fixo (2 edições) e o máximo de iterações do run.
+ */
+export function agenticFixBudget(maxIterations: number, cap: number = MAX_FIX_ATTEMPTS): number {
+  const iters = Number.isFinite(maxIterations) ? Math.floor(maxIterations) : 1
+  return Math.max(1, Math.min(cap, Math.max(1, iters)))
+}
+
+export interface AgenticFixDecision {
+  continueFix: boolean
+  reason?: 'FIX_BUDGET_EXHAUSTED' | 'LOOP_GUARD' | ''
+  message: string
+}
+
+/**
+ * Decide se o orquestrador deve iniciar MAIS uma rodada de
+ * edição agêntica (agente vê erro → edita arquivo diretamente):
+ * - fixAttempts >= fixBudget → parar (orçamento de edições)
+ * - loop-guard (mesma assinatura 2x / repo sem mudança) → parar
+ * O loop termina quando npm test passa, quando o orçamento de
+ * edições esgota ou quando o loop-guard detecta repetição.
+ */
+export function agenticFixDecision(input: {
+  fixAttempts: number
+  fixBudget: number
+  sameSignatures: string[]
+  repoChangedAfterFix: boolean | null
+}): AgenticFixDecision {
+  if (input.fixAttempts >= input.fixBudget) {
+    return {
+      continueFix: false,
+      reason: 'FIX_BUDGET_EXHAUSTED',
+      message:
+        `TETO_DE_EDICOES: ${input.fixAttempts} rodada(s) de edição agêntica usada(s) ` +
+        `(teto ${input.fixBudget}). O agente decide parar honestamente — reporte o estado ` +
+        'real dos testes no resultado final.',
+    }
+  }
+  const guard = shouldStopCorrectionCycle({
+    sameSignatures: input.sameSignatures,
+    repoChangedAfterCorrection: input.repoChangedAfterFix,
+  })
+  if (guard.stop) {
+    return { continueFix: false, reason: 'LOOP_GUARD', message: guard.message }
+  }
+  return { continueFix: true, reason: '', message: '' }
+}

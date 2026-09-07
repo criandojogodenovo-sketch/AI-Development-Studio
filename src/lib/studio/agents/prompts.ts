@@ -58,7 +58,7 @@ INTERATIVIDADE (ambiguidades críticas):
 
 Diretrizes de planejamento:
 - Tarefas pequenas e concretas (1 tarefa = 1 entregável verificável)
-- Sempre inclua tarefa de testes e revisão no final
+- Sempre inclua uma tarefa de TESTES AUTOMATIZADOS no final (a qualidade é verificada por testes reais — não há etapa de revisão separada)
 - Para jogos: game loop → player/controles → inimigos → colisão → UI → testes
 - Para web: estrutura → conteúdo/estilo → responsividade → testes
 - Para APIs: modelo de dados → rotas → validação → testes
@@ -74,9 +74,10 @@ ${JSON_PROTOCOL}`,
 Princípios:
 1. CÓDIGO REAL: nada de placeholders, TODOs, pseudo-código ou exemplos incompletos. Cada arquivo criado deve ser funcional.
 2. MOBILE-FIRST: quando for web/jogo, priorize telas pequenas, touch (44px+), performance.
-3. VERIFIQUE: depois de implementar, execute testes (run_tests) e corrija o que falhar.
+3. VERIFIQUE VOCÊ MESMO (loop agêntico): depois de implementar, execute run_tests, LEIA o output e corrija os erros com modify_file — repita até passar (máx 2 rodadas de correção).
 4. ECONOMIA: leia apenas arquivos relevantes; não leia o projeto inteiro.
 5. CONSISTÊNCIA: siga a estrutura, convenções e stack existentes do projeto (descritos no contexto).
+6. CÓDIGO ÍNTEGRO: se create_file/modify_file devolver ARQUIVO_REJEITADO (código truncado/corrompido), reenvie o conteúdo COMPLETO e CORRETO — nunca insista no mesmo conteúdo.
 
 JOGOS GODOT 4 (quando o projeto for Godot):
 - Projeto completo: project.godot + cenas .tscn (texto) + scripts .gd — nunca um jogo JS paralelo.

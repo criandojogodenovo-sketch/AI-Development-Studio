@@ -27,12 +27,26 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const run = await ownedRun(id, user.id)
   if (!run) return NextResponse.json({ error: 'RUN_NÃO_ENCONTRADO' }, { status: 404 })
 
+  // SERIALIZAÇÃO DEFENSIVA: `result` é coluna Json no DB
+  // ({output: "..."}) — o painel espera STRING. Sem isto, o
+  // frontend renderizava "[object Object]" na descrição da task.
   const progress = await db.task.findMany({
     where: { projectId: run.projectId },
     orderBy: { order: 'asc' },
     select: { id: true, order: true, title: true, description: true, status: true, agentRole: true, priority: true, attempts: true, maxAttempts: true, error: true, result: true },
     take: 20,
   }).catch(() => [])
+  const tasks = progress.map((t) => {
+    const resultJson = t.result as { output?: unknown } | null
+    return {
+      ...t,
+      description: typeof t.description === 'string' ? t.description : String(t.description ?? ''),
+      result:
+        resultJson && typeof resultJson === 'object' && typeof resultJson.output === 'string'
+          ? resultJson.output.slice(0, 4000)
+          : undefined,
+    }
+  })
 
   const executions = await db.execution.findMany({
     where: { projectId: run.projectId, source: 'poskli' },
@@ -67,7 +81,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
   return NextResponse.json({
     run,
-    tasks: progress,
+    tasks,
     executions,
     pendingQuestion: pendingQuestion
       ? {

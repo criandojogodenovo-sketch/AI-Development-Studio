@@ -17,7 +17,10 @@
 import { db } from '@/lib/db'
 import { STUDIO_CONFIG } from '../config'
 import { emitEvent } from '../events/bus'
-import { parseQuestionsInput, formatUserAnswers, type AgentQuestion, type UserAnswer } from './question-format.ts'
+import {
+  parseQuestionsInput, formatUserAnswers, nextQuestionPollAction,
+  type AgentQuestion, type UserAnswer,
+} from './question-format.ts'
 import type { ToolDefinition, ToolResult } from './types'
 
 const POLL_INTERVAL_MS = 2_000
@@ -84,29 +87,36 @@ export const askUserQuestionTool: ToolDefinition = {
     const windowMs = waitWindowMs()
     const deadline = Date.now() + windowMs
 
-    while (Date.now() < deadline) {
+    // ---- LOOP DE ESPERA: o agente BLOQUEIA aqui até a resposta
+    // (decisão pura/testável em nextQuestionPollAction) ----
+    while (true) {
       await sleep(POLL_INTERVAL_MS)
 
-      // cancelamento cooperativo do run Poskli → interrompe a espera
-      if (ctx.poskliRunId) {
-        const run = await db.poskliRun
-          .findUnique({ where: { id: ctx.poskliRunId }, select: { state: true } })
-          .catch(() => null)
-        if (run?.state === 'CANCELLED') {
-          await db.toolCall.update({ where: { id: call.id }, data: { status: 'CANCELLED', error: 'run cancelado' } }).catch(() => {})
-          return { ok: false, output: 'RUN_CANCELADO: o usuário cancelou a execução durante a pergunta. Finalize imediatamente.' }
-        }
+      const [runState, row] = await Promise.all([
+        ctx.poskliRunId
+          ? db.poskliRun.findUnique({ where: { id: ctx.poskliRunId }, select: { state: true } }).then((r) => r?.state ?? null).catch(() => null)
+          : Promise.resolve(null),
+        db.toolCall.findUnique({ where: { id: call.id }, select: { status: true, output: true } }).catch(() => null),
+      ])
+
+      const action = nextQuestionPollAction({
+        toolCallStatus: row?.status ?? 'PENDING',
+        runState,
+        now: Date.now(),
+        deadline,
+      })
+
+      if (action === 'CANCELLED') {
+        await db.toolCall.update({ where: { id: call.id }, data: { status: 'CANCELLED', error: 'run cancelado' } }).catch(() => {})
+        return { ok: false, output: 'RUN_CANCELADO: o usuário cancelou a execução durante a pergunta. Finalize imediatamente.' }
       }
 
-      const row = await db.toolCall
-        .findUnique({ where: { id: call.id }, select: { status: true, output: true } })
-        .catch(() => null)
-      if (row?.status === 'ANSWERED' && row.output) {
+      if (action === 'ANSWER' && row) {
         await db.toolCall
           .update({ where: { id: call.id }, data: { durationMs: Date.now() - new Date(call.createdAt).getTime() } })
           .catch(() => {})
         try {
-          const payload = JSON.parse(row.output) as { answers?: UserAnswer[] }
+          const payload = JSON.parse(row.output ?? '') as { answers?: UserAnswer[] }
           const answers = Array.isArray(payload.answers) ? payload.answers : []
           return {
             ok: true,
@@ -114,9 +124,12 @@ export const askUserQuestionTool: ToolDefinition = {
             data: { answered: true, toolCallId: call.id },
           }
         } catch {
-          return { ok: true, output: `[RESPOSTA DO USUÁRIO]\n${row.output.slice(0, 1200)}`, data: { answered: true } }
+          return { ok: true, output: `[RESPOSTA DO USUÁRIO]\n${(row.output ?? '').slice(0, 1200)}`, data: { answered: true } }
         }
       }
+
+      if (action === 'TIMEOUT') break
+      // WAIT → continua aguardando
     }
 
     // ---- timeout honesto: prossegue com suposição documentada ----

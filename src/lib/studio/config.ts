@@ -156,6 +156,9 @@ export const STUDIO_CONFIG = {
     // Menor que o orçamento do run (serverless 300s) — sem resposta,
     // o agente prossegue com a opção mais conservadora documentada.
     userQuestionTimeoutMs: num(process.env.USER_QUESTION_TIMEOUT_MS, 120_000),
+    // Teto de rodadas de EDIÇÃO no loop agêntico (após falha de
+    // testes o agente vê o erro e edita diretamente; para após 2).
+    maxFixAttempts: num(process.env.MAX_FIX_ATTEMPTS, 2),
   },
 } as const
 

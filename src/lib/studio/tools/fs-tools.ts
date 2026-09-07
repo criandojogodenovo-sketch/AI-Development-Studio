@@ -16,6 +16,7 @@ import {
   getWorkspaceSize,
 } from '../security/path'
 import { workspaceProvider } from '../workspace/db-provider'
+import { validateFileContent, writeFileVerified } from './file-integrity.ts'
 import type { ToolDefinition, ToolResult } from './types'
 
 /** Dual-write persistente: espelha a operação de disco no DB (fonte da verdade).
@@ -210,9 +211,30 @@ export const createFileTool: ToolDefinition = {
     const abs = safeResolve(ctx.workspaceRoot, relPath)
     validateFilePath(abs)
     validateFileSize(content, relPath)
+    // ---- VALIDAÇÃO PRÉ-ESCRITA (bug de corrupção): código com
+    // caracteres comidos/truncado NUNCA chega ao disco — o agente
+    // recebe o motivo instrutivo e reenvia o arquivo íntegro.
+    const check = validateFileContent(relPath, content)
+    if (!check.ok) {
+      return {
+        ok: false,
+        output:
+          `ARQUIVO_REJEITADO (${check.reason}): ${check.hint}. ` +
+          'Reenvie o conteúdo COMPLETO e CORRETO — se o arquivo for grande, divida em arquivos menores.',
+        data: { path: relPath, rejected: check.reason },
+      }
+    }
     await assertWorkspaceQuota(ctx.workspaceRoot, Buffer.byteLength(content))
     await fs.mkdir(path.dirname(abs), { recursive: true })
-    await fs.writeFile(abs, content, 'utf8')
+    // ---- VALIDAÇÃO PÓS-ESCRITA: grava, lê de volta e confere
+    const written = await writeFileVerified(abs, content)
+    if (!written.ok) {
+      return {
+        ok: false,
+        output: `ARQUIVO_CORROMPIDO (${written.reason}): ${written.hint}`,
+        data: { path: relPath, verified: false },
+      }
+    }
     await persistDb(() => workspaceProvider.writeFile(ctx.projectId, relPath, content))
     await emitEvent({
       type: 'tool.completed',
@@ -225,7 +247,7 @@ export const createFileTool: ToolDefinition = {
       message: `create_file: ${relPath} (${content.length} chars)`,
       data: { path: relPath, bytes: Buffer.byteLength(content) },
     })
-    return { ok: true, output: `ARQUIVO_CRIADO: ${relPath} (${Buffer.byteLength(content)}B)`, data: { path: relPath } }
+    return { ok: true, output: `ARQUIVO_CRIADO: ${relPath} (${Buffer.byteLength(content)}B, verificado pós-escrita)`, data: { path: relPath, verified: true } }
   },
 }
 
@@ -262,19 +284,46 @@ export const modifyFileTool: ToolDefinition = {
       }
       const updated = content.replace(search, String(args.replaceText))
       validateFileSize(updated, relPath)
+      // validação pré-escrita do RESULTADO da substituição
+      const check = validateFileContent(relPath, updated)
+      if (!check.ok) {
+        return {
+          ok: false,
+          output:
+            `SUBSTITUICAO_REJEITADA (${check.reason}): ${check.hint}. ` +
+            'A substituição deixaria o arquivo corrompido — ajuste o replaceText e tente novamente.',
+          data: { path: relPath, rejected: check.reason },
+        }
+      }
       await fs.mkdir(path.dirname(abs), { recursive: true })
-      await fs.writeFile(abs, updated, 'utf8')
+      const written = await writeFileVerified(abs, updated)
+      if (!written.ok) {
+        return { ok: false, output: `ARQUIVO_CORROMPIDO (${written.reason}): ${written.hint}`, data: { path: relPath, verified: false } }
+      }
       await persistDb(() => workspaceProvider.writeFile(ctx.projectId, relPath, updated))
-      return { ok: true, output: `ARQUIVO_MODIFICADO: ${relPath} (substituição aplicada)` }
+      return { ok: true, output: `ARQUIVO_MODIFICADO: ${relPath} (substituição aplicada e verificada)` }
     }
 
     if (args.content !== undefined) {
       const content = String(args.content)
       validateFileSize(content, relPath)
+      const check = validateFileContent(relPath, content)
+      if (!check.ok) {
+        return {
+          ok: false,
+          output:
+            `ARQUIVO_REJEITADO (${check.reason}): ${check.hint}. ` +
+            'Reenvie o conteúdo COMPLETO e CORRETO.',
+          data: { path: relPath, rejected: check.reason },
+        }
+      }
       await fs.mkdir(path.dirname(abs), { recursive: true })
-      await fs.writeFile(abs, content, 'utf8')
+      const written = await writeFileVerified(abs, content)
+      if (!written.ok) {
+        return { ok: false, output: `ARQUIVO_CORROMPIDO (${written.reason}): ${written.hint}`, data: { path: relPath, verified: false } }
+      }
       await persistDb(() => workspaceProvider.writeFile(ctx.projectId, relPath, content))
-      return { ok: true, output: `ARQUIVO_REESCRITO: ${relPath} (${content.length} chars)` }
+      return { ok: true, output: `ARQUIVO_REESCRITO: ${relPath} (${content.length} chars, verificado pós-escrita)` }
     }
 
     return { ok: false, output: 'Forneça searchText+replaceText OU content' }
