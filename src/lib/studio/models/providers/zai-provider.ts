@@ -48,14 +48,18 @@ export class ZAIProvider implements LLMProvider {
   }
 
   /**
-   * Chamada com RETRY + BACKOFF exponencial para 429/5xx.
-   * Limites: 5 tentativas, delay 2s→ 4s→ 8s→ 16s→ 32s (+ jitter).
+   * Chamada com RETRY LIMITADO (429/5xx apenas — 2 tentativas, delay
+   * ≤8s). FIX do congelamento: erros internos de TIMEOUT NÃO são
+   * re-tentados aqui (o ProviderChain aplica o timeout GLOBAL por
+   * chamada e avança para a próxima parada do pool; o retry interno
+   * multiplicava o tempo bloqueado: 5 tentativas × backoff 32s
+   * mantinha o run "IMPLEMENTING" congelado).
    */
   async complete(req: CompletionRequest): Promise<CompletionResult> {
     const zai = await getZAI()
     const started = Date.now()
     const timeoutMs = STUDIO_CONFIG.models.requestTimeoutMs
-    const MAX_RETRIES = 5
+    const MAX_RETRIES = 2
 
     let lastError: Error | null = null
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -70,7 +74,7 @@ export class ZAIProvider implements LLMProvider {
           }),
           new Promise<never>((_, reject) => {
             timer = setTimeout(
-              () => reject(Object.assign(new Error('MODEL_TIMEOUT'), { code: 'TIMEOUT' })),
+              () => reject(Object.assign(new Error('MODEL_TIMEOUT'), { code: 'TIMEOUT', timedOut: true })),
               timeoutMs
             )
           }),
@@ -91,10 +95,17 @@ export class ZAIProvider implements LLMProvider {
         if (timer) clearTimeout(timer)
         const e = err as Error & { code?: string }
         lastError = e
+        // TIMEOUT: propaga IMEDIATAMENTE (sem retry interno) — a
+        // classe TIMEOUT é elegível e o chain decide o failover.
+        if (e.code === 'TIMEOUT' || e.name === 'AbortError' || /MODEL_TIMEOUT/i.test(e.message ?? '')) {
+          throw Object.assign(new Error(`ZAI_TIMEOUT: ${e.message}`), {
+            code: 'TIMEOUT', errorClass: 'TIMEOUT', timedOut: true,
+          })
+        }
         const isRateLimit = /429|too many requests/i.test(e.message ?? '')
         const isTransient = /5\d\d|ECONNRESET|ETIMEDOUT|fetch failed/i.test(e.message ?? '')
         if ((isRateLimit || isTransient) && attempt < MAX_RETRIES) {
-          const delay = Math.min(2000 * 2 ** attempt, 32_000) + Math.random() * 1000
+          const delay = Math.min(2000 * 2 ** attempt, 8_000) + Math.random() * 500
           await new Promise((r) => setTimeout(r, delay))
           continue
         }

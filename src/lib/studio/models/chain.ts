@@ -36,6 +36,14 @@
 //   Falhas ELEGÍVEIS (rede/5xx/timeout/401-403) avançam no chain
 //   como antes; CLIENT_ERROR/UNKNOWN não avançam (conservador).
 //
+// TIMEOUT GLOBAL POR CHAMADA (FIX do congelamento em IMPLEMENTING):
+//   cada parada tem um prazo MÁXIMO (MODEL_CALL_TIMEOUT_MS, 30s
+//   default) medido na PROMESSA completa (não só no HTTP) — se um
+//   modelo não responder em 30s, o erro MODEL_CALL_TIMEOUT (classe
+//   TIMEOUT, elegível) faz o chain AVANÇAR para a próxima parada do
+//   pool imediatamente. A chamada antiga é abandonada (o handler já
+//   está anexado — sem unhandled rejection).
+//
 // Sem chaves B.AI (sandbox local): o SDK local (zai) substitui o
 // B.AI nas paradas — a arquitetura de agentes não muda.
 // ============================================================
@@ -250,10 +258,51 @@ export interface RateLimitOptions {
   sleep?: (ms: number) => Promise<void>
   backoffMs?: readonly number[]
   maxAttempts?: number
+  /** Timeout GLOBAL por chamada de modelo (default 30s — ver STALL).
+   *  Desativar apenas em testes com um valor GRANDE (ex.: 600000) —
+   *  NÃO usar Infinity (setTimeout converte para 1ms). */
+  callTimeoutMs?: number
 }
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+/** Default do timeout global por chamada (MODEL_CALL_TIMEOUT_MS). */
+export const MODEL_CALL_TIMEOUT_DEFAULT_MS = 30_000
+
+/** Constrói o erro de timeout global da chamada (elegível p/ failover). */
+export function callTimeoutError(provider: ProviderName, model: string, ms: number): Error {
+  return Object.assign(
+    new Error(
+      `MODEL_CALL_TIMEOUT: ${provider}/${model} não respondeu em ${ms}ms — a tentar a próxima parada do pool`
+    ),
+    { errorClass: 'TIMEOUT' as const, timedOut: true, code: 'MODEL_CALL_TIMEOUT', callTimeout: true }
+  )
+}
+
+/** Executa complete() com prazo MÁXIMO por chamada — a promessa
+ *  abandonada não gera unhandled rejection (handlers anexados). */
+function completeWithCallTimeout(
+  entry: ChainEntry,
+  req: Omit<CompletionRequest, 'model'>,
+  timeoutMs: number
+): Promise<CompletionResult> {
+  return new Promise<CompletionResult>((resolve, reject) => {
+    const timer = setTimeout(() => reject(callTimeoutError(entry.provider, entry.model, timeoutMs)), timeoutMs)
+    entry.llm
+      .complete({ ...req, model: entry.model })
+      .then(
+        (result) => {
+          clearTimeout(timer)
+          resolve(result)
+        },
+        (err) => {
+          clearTimeout(timer)
+          reject(err)
+        }
+      )
+  })
 }
 
 // ---------- EXECUÇÃO COM FAILOVER CONTROLADO + ANTI-RATE-LIMIT ----------
@@ -308,6 +357,10 @@ export async function executeWithChain(
   const sleep = rl.sleep ?? defaultSleep
   const backoff = rl.backoffMs ?? RATE_LIMIT_BACKOFF_MS
   const maxAttempts = rl.maxAttempts ?? RATE_LIMIT_MAX_ATTEMPTS
+  // TIMEOUT GLOBAL por chamada (default 30s) — o failover acontece
+  // no PRÓPRIO chain: timeout é classe elegível, a próxima parada
+  // do pool é tentada imediatamente.
+  const callTimeoutMs = rl.callTimeoutMs ?? MODEL_CALL_TIMEOUT_DEFAULT_MS
 
   const attempts: ChainAttempt[] = []
   let lastErr: unknown = null
@@ -322,7 +375,7 @@ export async function executeWithChain(
     while (!advance) {
       tries++
       try {
-        const result = await entry.llm.complete({ ...req, model: entry.model })
+        const result = await completeWithCallTimeout(entry, req, callTimeoutMs)
         return { result, provider: entry.provider, attempts }
       } catch (err) {
         lastErr = err
@@ -365,6 +418,14 @@ export async function executeWithChain(
         }
 
         // ---- falha NÃO-429 ----
+        // Timeout GLOBAL da chamada (30s): log destacado — é o fix
+        // do congelamento; a parada seguinte assume em vez de o run
+        // ficar IMPLEMENTING infinitamente.
+        if (cls === 'TIMEOUT' && (err as { callTimeout?: boolean }).callTimeout) {
+          console.warn(
+            `[ProviderChain] TIMEOUT global de ${callTimeoutMs}ms em ${entry.provider}/${entry.model} — a tentar a próxima parada do pool`
+          )
+        }
         if (!eligibleForChainFailover(err)) {
           // CLIENT_ERROR / UNKNOWN: para aqui — política conservadora
           throw err

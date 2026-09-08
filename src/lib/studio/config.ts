@@ -46,7 +46,11 @@ export const STUDIO_CONFIG = {
     // O sistema funciona COMPLETAMENTE sem DeepSeek.
     enableDeepseek: bool(process.env.ENABLE_DEEPSEEK, false),
     deepseekMaxDailyRequests: num(process.env.DEEPSEEK_MAX_DAILY_REQUESTS, 10),
-    requestTimeoutMs: num(process.env.MODEL_REQUEST_TIMEOUT_MS, 180_000),
+    // FIX do congelamento em IMPLEMENTING: o timeout por request era
+    // 180s — uma chamada pendente segurava o run por 3+ min (×2 chaves
+    // B.AI = 6 min) até a função serverless morrer e o run congelar.
+    // Agora: 30s por request HTTP (env MODEL_REQUEST_TIMEOUT_MS).
+    requestTimeoutMs: num(process.env.MODEL_REQUEST_TIMEOUT_MS, 30_000),
   },
 
   // ---------- B.AI (gateway dos modelos; server-side ONLY) ----------
@@ -159,6 +163,21 @@ export const STUDIO_CONFIG = {
     // Teto de rodadas de EDIÇÃO no loop agêntico (após falha de
     // testes o agente vê o erro e edita diretamente; para após 2).
     maxFixAttempts: num(process.env.MAX_FIX_ATTEMPTS, 2),
+  },
+
+  // ---------- STALL WATCHDOG (FIX do congelamento em IMPLEMENTING) ----------
+  // Heartbeat a cada 15s (updatedAt do run + registro de atividade
+  // em memória); >30s sem atividade real → o run é morto com TIMEOUT
+  // honesto em vez de ficar "IMPLEMENTING" para sempre quando a
+  // função serverless morre a meio de uma chamada pendente.
+  stall: {
+    /** Intervalo do heartbeat (updatedAt no DB). */
+    heartbeatMs: num(process.env.RUN_HEARTBEAT_MS, 15_000),
+    /** Sem atividade por mais que isto → run morto com TIMEOUT. */
+    stallTimeoutMs: num(process.env.RUN_STALL_TIMEOUT_MS, 30_000),
+    /** Timeout GLOBAL por chamada de modelo (chain avança para a
+     *  próxima parada do pool quando estoura). */
+    callTimeoutMs: num(process.env.MODEL_CALL_TIMEOUT_MS, 30_000),
   },
 } as const
 

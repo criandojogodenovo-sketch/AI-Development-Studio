@@ -31,6 +31,7 @@ function agentDisplayName(agentId: string): string {
   return names[agentId] ?? 'Agente'
 }
 import { RepeatedFailureDetector } from '../orchestrator/loop-detector'
+import { touchPoskliActivity } from '../poskli/stall-watchdog-core.ts'
 import type { AgentDefinition } from './definitions'
 import type { ChatMessage } from '../models/types'
 
@@ -275,6 +276,9 @@ export class AgentRunner {
 
     try {
       while (this.steps.length < this.effectiveMaxSteps) {
+        // atividade REAL para o watchdog do run Poskli (cada passo
+        // do agente conta — evita kill com TIMEOUT durante trabalho vivo)
+        touchPoskliActivity(this.input.poskliRunId)
         // ---- LIMITES Duros ----
         if (Date.now() > this.deadline) {
           status = 'TIMEOUT'
@@ -332,6 +336,8 @@ export class AgentRunner {
         })
         this.tokensIn += completion.promptTokens
         this.tokensOut += completion.completionTokens
+        // resposta do modelo recebida — atividade real p/ o watchdog
+        touchPoskliActivity(this.input.poskliRunId)
 
         // ---- ORÇAMENTO DE TOKENS do subagente (delegação) ----
         // Excedeu → para honestamente: "Orçamento atingido, a terminar"
@@ -493,6 +499,10 @@ export class AgentRunner {
         let ok: boolean
         try {
           const res = await runTool(String(toolName), toolArgs, ctx)
+          // tool concluída — atividade real p/ o watchdog (run_tests e
+          // instalações podem demorar; o toque de INÍCIO já aconteceu no
+          // passo, este confirma o fim)
+          touchPoskliActivity(this.input.poskliRunId)
           // Tarefa C §3d: outputs de ferramentas (run_tests/run_command/
           // read_file/…) truncados em 2k chars ANTES de irem ao LLM
           observation = clipToolOutput(res.output)

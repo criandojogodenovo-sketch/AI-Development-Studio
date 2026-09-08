@@ -590,3 +590,44 @@ Stage Summary:
 ### 6. Verificação local + deploy
 - Postgres 18 embutido local (porta 5433) + dev server + browser real: login, envio, auto-criação, clarify, modal ask_user_question (respondido pela UI), Activity Log ao vivo, detalhes técnicos, resultado final com quota — 10 screenshots em /home/z/my-project/download/poskli-chat-evidence/
 - Deploy Vercel: novo chunk 4d42b5c407542c41.js com as strings do chat; /api/chat 401 sem auth; GET / 200
+
+## Tarefa: Corrigir congelamento em IMPLEMENTING + variáveis de ambiente na Vercel (2026-09-08)
+
+**Commit:** `fix: prevent IMPLEMENTING stalls by configuring models and adding timeouts`
+
+### 0. Diagnóstico (causa raiz)
+- Produção: runs congelavam em IMPLEMENTING 10+ min sem execução. Cadeia causal:
+  1. `MODEL_REQUEST_TIMEOUT_MS` vazio + default 180s por request — chamada pendente segurava o run 3+ min (×2 chaves B.AI)
+  2. ZAIProvider com 5 retries internos + backoff até 32s multiplicava o tempo bloqueado
+  3. Deadline do run só verificado ENTRE tarefas — nunca DENTRO de uma chamada pendente
+  4. Função serverless (maxDuration 300s) morria a meio da chamada → nada atualizava o run → IMPLEMENTING para sempre
+  5. GLM_MODEL/QWEN_MODEL/HY3_MODEL/EXECUTION_PROVIDER/MODEL_REQUEST_TIMEOUT_MS definidos como strings VAZIAS na Vercel (warnings do env-validator)
+
+### 1. Variáveis de ambiente (Vercel, production)
+- GLM_MODEL=glm-5.3-flash · QWEN_MODEL=qwen3.8-flash (default do código; "qwen-3.8-flash" com hífen não é id válido) · HY3_MODEL=hy3
+- EXECUTION_PROVIDER=local (único provider implementado; "bai" não é reconhecido pelo executor — cairia em warning + local)
+- MODEL_REQUEST_TIMEOUT_MS=30000 (timeout por request HTTP explícito em infra)
+
+### 2. Timeout global por chamada de modelo (30s)
+- `chain.ts`: `completeWithCallTimeout()` — cada parada do pool tem prazo MÁXIMO medido na PROMESSA completa; estourou → erro MODEL_CALL_TIMEOUT (classe TIMEOUT, elegível) → chain AVANÇA para a próxima parada imediatamente; promessa abandonada é inerte (handlers anexados)
+- `config.ts`: models.requestTimeoutMs 180s → 30s; nova seção stall { heartbeatMs 15s, stallTimeoutMs 30s, callTimeoutMs 30s } (RUN_HEARTBEAT_MS/RUN_STALL_TIMEOUT_MS/MODEL_CALL_TIMEOUT_MS)
+- `zai-provider.ts`: MAX_RETRIES 5 → 2 (só 429/5xx); timeout interno NÃO é re-tentado (chain decide); backoff ≤ 8s
+- `router.ts`: chatRole passa callTimeoutMs do config ao executeWithChain
+
+### 3. Stall watchdog (heartbeat 15s · kill com TIMEOUT >30s)
+- `stall-watchdog-core.ts` (PURO, testável): stallWatchdogDecision + registry touchPoskliActivity por poskliRunId
+- `stall-watchdog.ts` (runtime): startRunWatchdog — heartbeat atualiza run.updatedAt no DB; inatividade > stallTimeoutMs → run morto FAILED/TIMEOUT + outcomeReason STALL_WATCHDOG + evento pipeline.failed + projeto FAILED; idempotente (run terminal não é sobrescrito); intervalo unref (não segura a função serverless viva)
+- `orchestrator.ts`: watchdog ativo durante TODO o run (stop no finally); ctx.killed guardado — persistFinalResult/catch/stage/setState/loop IMPLEMENTING abortam sem sobrescrever a decisão; touch() em transições/estágios/implementação/testes
+- `agents/base.ts`: touchPoskliActivity por passo do agente + após resposta do modelo + após cada tool
+- KEEPALIVE p/ execuções longas: withWatchdogKeepalive (toca a cada 10s durante npm test ≤180s e build ≤90s — trabalho real ≠ congelamento)
+
+### 4. Planeador resiliente (fallback com AVISO no chat)
+- `analyzeStage`: runAgent do planner em try/catch — LLM não responde (erro/timeout) → plano determinístico + evento run.analyzed com aviso visível ("Aviso: o planeador LLM não respondeu… plano determinístico… verifique GLM_MODEL/QWEN_MODEL/HY3_MODEL")
+- Plano inválido/vazio (JSON não parseável) → MESMO aviso honesto (antes era silencioso)
+
+### 5. Testes: 282/282 (+14)
+- poskli-stall-watchdog 7 (W1-W7: decisão pura, registry, limpeza, silêncio) · providers-call-timeout 7 (CT1-CT7: failover por timeout, classe do erro, chain exaurido ≠ QUOTA, rastreabilidade, promessa inerte, default 30s)
+- tsc: 14 erros PRÉ-EXISTENTES, ZERO novos · eslint limpo · next build EXIT 0
+
+### 6. Deploy + verificação
+- Deploy de produção (Vercel) + diagnóstico: warnings de vars vazias ELIMINADOS; execução de teste SEM congelamento em IMPLEMENTING

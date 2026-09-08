@@ -34,6 +34,7 @@ import {
 import { clipToolOutput } from '../context/clip.ts'
 import { createTasksFromPlan, transitionTask, readyTasks } from '../orchestrator/task-graph'
 import { emitEvent } from '../events/bus'
+import { startRunWatchdog, type RunWatchdog } from './stall-watchdog.ts'
 import { ensureMaterialized, syncBackToDb } from '../workspace/sync'
 import { workspaceProvider } from '../workspace/db-provider'
 import { runExecution } from '../execution/engine'
@@ -141,6 +142,12 @@ interface PoskliContext {
   agentRunIds: string[]
   /** Classificação do erro mais significativo (taxonomia §31). */
   errorCode?: PoskliErrorCode
+  /** STALL WATCHDOG: run morto por inatividade — o fluxo
+   *  sobrevivente NÃO sobrescreve a decisão (persistFinalResult
+   *  ignora; estágios abortam cedo). */
+  killed?: boolean
+  /** Watchdog ativo deste run (heartbeat + kill com TIMEOUT). */
+  watchdog?: RunWatchdog
 }
 
 const MAX_TASKS = 8
@@ -265,11 +272,14 @@ const STATE_LABELS: Record<PoskliState, string> = {
 
 // ---------- HELPERS ----------
 
-/** Muda o estado visível; retorna false se o run foi cancelado. */
+/** Muda o estado visível; retorna false se o run foi cancelado
+ *  (ou morto pelo watchdog — o fluxo aborta cedo, sem sobrescrever). */
 async function setState(ctx: PoskliContext, state: PoskliState): Promise<boolean> {
+  if (ctx.killed) return false
   const row = await db.poskliRun.findUnique({ where: { id: ctx.runId }, select: { state: true } })
   if (row?.state === 'CANCELLED') return false
   await db.poskliRun.update({ where: { id: ctx.runId }, data: { state } })
+  ctx.watchdog?.touch()
   await emitEvent({
     type: 'poskli.state',
     projectId: ctx.projectId,
@@ -287,6 +297,7 @@ async function stage<T>(ctx: PoskliContext, stageName: PoskliState, fn: () => Pr
   const entry: StageEntry = { stage: stageName, state: 'RUNNING', startedAt }
   ctx.stages = [...ctx.stages, entry]
   await db.poskliRun.update({ where: { id: ctx.runId }, data: { stages: ctx.stages as unknown as object } })
+  ctx.watchdog?.touch()
 
   try {
     const result = await fn()
@@ -306,6 +317,7 @@ async function stage<T>(ctx: PoskliContext, stageName: PoskliState, fn: () => Pr
       where: { id: ctx.runId },
       data: { stages: ctx.stages as unknown as object, tokensIn: ctx.tokens.in, tokensOut: ctx.tokens.out },
     }).catch(() => {})
+    ctx.watchdog?.touch()
   }
 }
 
@@ -401,43 +413,75 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
     ...rules.never.map((r) => `- NUNCA: ${r.toLowerCase()}`),
   ].join('\n')
 
-  const out = await runAgent(
-    {
-      agent: master,
-      projectId: ctx.projectId,
-      workspaceRoot: root,
-      runType: 'PLAN',
-      poskliRunId: ctx.runId,
-      objective: [
-        `Pedido do usuário: "${ctx.request}"`,
-        '',
-        `## CLASSIFICAÇÃO DO PEDIDO (TOON)\n${instructionsBlock}`,
-        '',
-        `## RITMO RECOMENDADO PARA ESTE PEDIDO\n${planMode.hint}`,
-        '',
-        'Analise o estado atual do projeto e produza um plano JSON:',
-        '{"plan": {"architecture": "...", "stack": [...], "tasks": [{"title": "...", "description": "...", "agentRole": "coding|testing|review", "priority": "HIGH|MEDIUM|LOW", "dependsOn": [índices]}]}}',
-        'MÁXIMO 4 tarefas. Cada tarefa concreta e verificável por testes. Inclua SEMPRE uma tarefa de testes automatizados (agentRole "testing").',
-      ].join('\n'),
-      contextBlock: [
-        `## PROJETO: ${project?.name} (tipo: ${project?.type})`,
-        `## DESCRIÇÃO: ${project?.description}`,
-        `## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`,
-        fileBlock ? `## ARQUIVOS RELEVANTES\n${fileBlock}` : '(workspace vazio ou sem arquivos relevantes)',
-      ].join('\n\n'),
-      // FASE 2 — orçamento por nível aplicado ao planner
-      budget: { maxSteps: ctx.budget.maxSteps, agentTimeoutMs: ctx.budget.agentTimeoutMs },
-    },
-    Math.min(12, ctx.budget.maxToolCalls)
-  )
+  // PLANEADOR RESILIENTE (FIX do congelamento): se o LLM não
+  // responder (erro/timeout), o run NÃO morre — usa o plano
+  // determinístico mas AVISA no chat (o usuário sabe que a
+  // qualidade do plano é inferior e porquê).
+  let out: Awaited<ReturnType<typeof runAgent>>
+  let plannerFailed = false
+  let plannerFailReason = ''
+  try {
+    out = await runAgent(
+      {
+        agent: master,
+        projectId: ctx.projectId,
+        workspaceRoot: root,
+        runType: 'PLAN',
+        poskliRunId: ctx.runId,
+        objective: [
+          `Pedido do usuário: "${ctx.request}"`,
+          '',
+          `## CLASSIFICAÇÃO DO PEDIDO (TOON)\n${instructionsBlock}`,
+          '',
+          `## RITMO RECOMENDADO PARA ESTE PEDIDO\n${planMode.hint}`,
+          '',
+          'Analise o estado atual do projeto e produza um plano JSON:',
+          '{"plan": {"architecture": "...", "stack": [...], "tasks": [{"title": "...", "description": "...", "agentRole": "coding|testing|review", "priority": "HIGH|MEDIUM|LOW", "dependsOn": [índices]}]}}',
+          'MÁXIMO 4 tarefas. Cada tarefa concreta e verificável por testes. Inclua SEMPRE uma tarefa de testes automatizados (agentRole "testing").',
+        ].join('\n'),
+        contextBlock: [
+          `## PROJETO: ${project?.name} (tipo: ${project?.type})`,
+          `## DESCRIÇÃO: ${project?.description}`,
+          `## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`,
+          fileBlock ? `## ARQUIVOS RELEVANTES\n${fileBlock}` : '(workspace vazio ou sem arquivos relevantes)',
+        ].join('\n\n'),
+        // FASE 2 — orçamento por nível aplicado ao planner
+        budget: { maxSteps: ctx.budget.maxSteps, agentTimeoutMs: ctx.budget.agentTimeoutMs },
+      },
+      Math.min(12, ctx.budget.maxToolCalls)
+    )
+  } catch (e) {
+    plannerFailed = true
+    const classified = classifyError(e)
+    plannerFailReason = `${classified.code}: ${classified.detail.slice(0, 160)}`
+    out = {
+      status: 'FAILED',
+      result: '',
+      steps: [],
+      tokensIn: 0,
+      tokensOut: 0,
+      durationMs: 0,
+      runId: '',
+    }
+    ctx.evidence.push(`⚠ Planeador LLM não respondeu (${classified.code}) — plano determinístico usado`)
+    console.warn(`[Poskli] planeador falhou (${plannerFailReason}) — a usar plano determinístico com aviso`)
+  }
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
-  ctx.agentRunIds.push(out.runId)
+  if (out.runId) ctx.agentRunIds.push(out.runId)
 
   const planJson = extractJson(out.result)
   let plan = (planJson?.plan as Plan) ?? null
   if (!plan && planJson?.tasks) plan = planJson as unknown as Plan
   if (!plan || !Array.isArray(plan.tasks) || plan.tasks.length === 0) {
+    // fallback determinístico + AVISO VISÍVEL no chat (nunca silencioso)
+    plannerFailed = true
+    if (!plannerFailReason) {
+      plannerFailReason = out.result
+        ? 'a resposta do modelo não continha um plano JSON válido'
+        : 'o modelo não devolveu resposta utilizável'
+      ctx.evidence.push(`⚠ Plano do LLM inválido/vazio — plano determinístico usado`)
+    }
     plan = {
       architecture: 'Plano determinístico de fallback',
       stack: [],
@@ -446,6 +490,21 @@ async function analyzeStage(ctx: PoskliContext): Promise<Plan> {
         { title: 'Testes automatizados', description: 'Crie testes node:test cobrindo a implementação; execute e reporte evidências.', agentRole: 'testing', priority: 'HIGH', dependsOn: [0] },
       ],
     }
+  }
+  // AVISO no chat: uma única mensagem honesta quando o planeador
+  // LLM falhou e o plano determinístico assumiu.
+  if (plannerFailed) {
+    await emitEvent({
+      type: 'run.analyzed',
+      projectId: ctx.projectId,
+      runId: ctx.runId,
+      agent: 'master',
+      message:
+        'Aviso: o planeador LLM não respondeu (' + plannerFailReason.slice(0, 120) +
+        '). A usar um plano determinístico simples — o pedido vai ser executado, ' +
+        'mas com um plano de qualidade inferior. Se persistir, verifique os modelos configurados (GLM_MODEL/QWEN_MODEL/HY3_MODEL).',
+      data: { degraded: true, plannerFallback: true, reason: plannerFailReason.slice(0, 200) },
+    })
   }
   // NORMALIZAÇÃO (bug de serialização): o LLM pode devolver
   // description/title como objetos — achatamos em texto legível
@@ -509,6 +568,8 @@ async function implementTask(
 
   await transitionTask(task.id, 'RUNNING', { attempts: { increment: 1 }, input: { description: task.description, agentRole: task.agentRole, poskli: ctx.runId } as object })
   await emitEvent({ type: 'task.started', projectId: ctx.projectId, taskId: task.id, runId: ctx.runId, agent: agent.id, message: `Poskli — implementando: ${task.title}` })
+  // atividade real para o watchdog (subagente iniciado)
+  ctx.watchdog?.touch()
 
   // DELEGAÇÃO — orçamentos ESPECÍFICOS do subagente, ELÁSTICOS por
   // dificuldade do pedido (TOON: simple 150k/20 · medium 200k/24 ·
@@ -550,6 +611,8 @@ async function implementTask(
     },
     toolCallCap
   )
+  // atividade real para o watchdog (implementação concluída)
+  ctx.watchdog?.touch()
   ctx.tokens.in += out.tokensIn
   ctx.tokens.out += out.tokensOut
   ctx.agentRunIds.push(out.runId)
@@ -560,20 +623,37 @@ async function implementTask(
   return { status: out.status, result: out.result }
 }
 
+/** KEEPALIVE do watchdog para execuções LONGAS (testes até 180s,
+ *  build até 90s): toca a cada 10s enquanto a promessa está em
+ *  curso — trabalho real em curso ≠ congelamento. */
+async function withWatchdogKeepalive<T>(ctx: PoskliContext, p: Promise<T>): Promise<T> {
+  const keep = setInterval(() => ctx.watchdog?.touch(), 10_000)
+  keep.unref?.()
+  try {
+    return await p
+  } finally {
+    clearInterval(keep)
+  }
+}
+
 /** Roda os testes REAIS no Execution Engine e registra TestRecord com identidade. */
 async function runTestsStage(ctx: PoskliContext, trigger: TestRecord['trigger']): Promise<TestOutcome> {
   const project = await db.project.findUnique({ where: { id: ctx.projectId }, select: { type: true } })
   const command = await testCommandFor(ctx.projectId, project?.type ?? 'EMPTY_PROJECT')
   ctx.executions++
+  ctx.watchdog?.touch() // execução real (pode demorar — conta como atividade)
 
-  const res = await runExecution({
+  // KEEPALIVE: os testes podem correr até 180s — trabalho REAL em
+  // curso, não congelamento. O keepalive toca o watchdog durante a
+  // execução para o kill de inatividade não disparar em falso.
+  const res = await withWatchdogKeepalive(ctx, runExecution({
     projectId: ctx.projectId,
     command,
     userId: ctx.userId,
     source: 'poskli',
     trigger: 'tester',
     timeoutMs: Math.min(180_000, Math.max(10_000, ctx.deadline - Date.now() - 15_000)),
-  })
+  }))
 
   await db.poskliRun.update({ where: { id: ctx.runId }, data: { lastExecId: res.executionId } }).catch(() => {})
   const passed = res.status === 'SUCCESS' && res.exitCode === 0
@@ -809,6 +889,21 @@ async function runPoskliInner(runId: string): Promise<void> {
     agentRunIds: [],
   }
 
+  // STALL WATCHDOG (FIX do congelamento em IMPLEMENTING): heartbeat
+  // a cada 15s (updatedAt no DB) + kill com TIMEOUT após >30s sem
+  // atividade real. O watchdog morre com a função serverless — se
+  // isso acontecer, updatedAt congela e a stale recovery (>10min)
+  // permanece como última linha de defesa.
+  ctx.watchdog = startRunWatchdog({
+    runId: ctx.runId,
+    projectId: ctx.projectId,
+    heartbeatMs: STUDIO_CONFIG.stall.heartbeatMs,
+    stallTimeoutMs: STUDIO_CONFIG.stall.stallTimeoutMs,
+    onStall: () => {
+      ctx.killed = true
+    },
+  })
+
   try {
     await db.project.update({ where: { id: ctx.projectId }, data: { status: 'RUNNING' } }).catch(() => {})
 
@@ -865,7 +960,14 @@ async function runPoskliInner(runId: string): Promise<void> {
       let guard = 0
       let completed = 0
       while (guard++ < 24) {
+        if (ctx.killed) {
+          throw Object.assign(
+            new Error('STALL_KILL: run morto pelo watchdog (inatividade) — estado final já persistido'),
+            { code: 'STALL_KILL', watchdog: true }
+          )
+        }
         if (Date.now() > ctx.deadline) throw new Error(`TIMEOUT: orçamento de ${(effectiveBudgetMs / 1000).toFixed(0)}s esgotado na implementação`)
+        ctx.watchdog?.touch()
         const ready = await readyTasks(ctx.projectId)
         if (ready.length === 0) break
         const fresh = await db.task.findUnique({ where: { id: ready[0].id } })
@@ -1026,14 +1128,15 @@ async function runPoskliInner(runId: string): Promise<void> {
       let buildOk: boolean | null = null
       if (buildCommand && Date.now() < ctx.deadline - 45_000) {
         ctx.executions++
-        const buildRes = await runExecution({
+        // KEEPALIVE: build pode correr até 90s — trabalho real, não stall
+        const buildRes = await withWatchdogKeepalive(ctx, runExecution({
           projectId: ctx.projectId,
           command: buildCommand,
           userId: ctx.userId,
           source: 'poskli',
           trigger: 'verifier',
           timeoutMs: Math.min(90_000, Math.max(10_000, ctx.deadline - Date.now() - 10_000)),
-        })
+        }))
         buildOk = buildRes.status === 'SUCCESS' && buildRes.exitCode === 0
       }
       const artifactsProduced = await auditArtifacts(ctx)
@@ -1065,6 +1168,13 @@ async function runPoskliInner(runId: string): Promise<void> {
     } satisfies DeriveFinalStatusInput)
     await persistFinalResult(ctx, derivation, started)
   } catch (e) {
+    // ---- WATCHDOG já matou o run (TIMEOUT sem atividade) ----
+    // A decisão do watchdog é a verdade final — o fluxo sobrevivente
+    // NÃO re-deriva nem sobrescreve (o run já está FAILED/TIMEOUT).
+    if (ctx.killed) {
+      console.warn('[Poskli] run já morto pelo watchdog — a ignorar erro do fluxo sobrevivente')
+      return
+    }
     // ---- ERRO: CLASSIFICAR → DERIVAR CONSERVADORAMENTE (nunca sucesso) ----
     const classified = classifyError(e)
     const row = await db.poskliRun.findUnique({ where: { id: runId }, select: { state: true } }).catch(() => null)
@@ -1098,6 +1208,8 @@ async function runPoskliInner(runId: string): Promise<void> {
       }).catch(() => {})
     }
   } finally {
+    // watchdog desligado — o run terminou (bem ou mal) por si
+    ctx.watchdog?.stop()
     // sync final + memória do projeto (best-effort)
     await syncBackToDb(ctx.projectId).catch(() => {})
     await updateProjectMemory(ctx.projectId, {
@@ -1113,6 +1225,14 @@ async function persistFinalResult(
   started: number,
   classifiedError?: ReturnType<typeof classifyError>
 ): Promise<void> {
+  // GUARDA DO WATCHDOG: o run foi morto por inatividade (TIMEOUT) —
+  // o estado FAILED/TIMEOUT persistido pelo watchdog é a verdade
+  // final; uma persistência tardia do fluxo sobrevivente sobrescreveria
+  // a decisão e mascararia o congelamento que o watchdog detetou.
+  if (ctx.killed) {
+    console.warn('[Poskli] persistFinalResult ignorado — run morto pelo watchdog (TIMEOUT)')
+    return
+  }
   const terminal = displayFromGlobal(derivation.state)
   const resultMd = deriveResultMarkdown(derivation, {
     request: ctx.request,

@@ -351,6 +351,11 @@ export class ModelRouter {
         messages,
         temperature: opts?.temperature,
         maxTokens: opts?.maxTokens,
+      }, {
+        // TIMEOUT GLOBAL por chamada (FIX do congelamento em
+        // IMPLEMENTING): 30s default (MODEL_CALL_TIMEOUT_MS) —
+        // estourou, o chain avança para a próxima parada do pool.
+        callTimeoutMs: STUDIO_CONFIG.stall.callTimeoutMs,
       })
       result = executed.result
       if (executed.provider !== entries[0]?.provider) {
