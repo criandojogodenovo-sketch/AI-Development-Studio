@@ -9,6 +9,30 @@ import { STUDIO_CONFIG } from '@/lib/studio/config'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
+/** Janela de run travado (stale): o HEARTBEAT do watchdog atualiza
+ *  run.updatedAt a cada 15s enquanto o processo vive — logo >2 min
+ *  sem update num estado ATIVO significa função serverless MORTA a
+ *  meio do run (fix do congelamento em IMPLEMENTING: era 10 min).
+ *  Runs recuperáveis são detetados TAMBÉM no GET (polling da UI),
+ *  sem esperar o usuário criar um novo run. */
+const STALE_RUN_MS = 2 * 60 * 1000
+
+/** Recupera runs ativos e sem heartbeat (função morta) — usado pelo
+ *  POST (antes de criar novo run) e pelo GET (polling da UI). */
+async function recoverIfStale(
+  active: { id: string; startedAt: Date; updatedAt: Date } | null
+): Promise<boolean> {
+  if (!active) return false
+  const lastActivity = Math.max(
+    new Date(active.startedAt).getTime(),
+    new Date(active.updatedAt).getTime()
+  )
+  if (Date.now() - lastActivity < STALE_RUN_MS) return false
+  // recuperação HONESTA: deriva estado conservador (interrompido ≠ concluído)
+  await recoverStaleRun(active.id).catch(() => {})
+  return true
+}
+
 /**
  * POST /api/poskli/run { project, request, poskliVersion? } — inicia o
  * ORQUESTRADOR POSKLI (resposta imediata 202; execução via after() —
@@ -58,18 +82,11 @@ export async function POST(req: Request) {
     orderBy: { startedAt: 'desc' },
   })
   if (active) {
-    const staleMs = 10 * 60 * 1000
     // última atividade REAL (updatedAt muda a cada estágio/persistência —
     // antes usava startedAt duas vezes, bug que marcava runs vivos como travados)
-    const lastActivity = Math.max(
-      new Date(active.startedAt).getTime(),
-      new Date(active.updatedAt).getTime()
-    )
-    if (Date.now() - lastActivity < staleMs) {
+    if (!(await recoverIfStale(active))) {
       return NextResponse.json({ error: 'POSKLI_JÁ_ATIVO neste projeto', runId: active.id }, { status: 409 })
     }
-    // recuperação HONESTA: deriva estado conservador (interrompido ≠ concluído)
-    await recoverStaleRun(active.id).catch(() => {})
   }
 
   const { runId } = await startPoskli({
@@ -88,7 +105,11 @@ export async function POST(req: Request) {
 }
 
 /** GET /api/poskli/run?project= — sessões Poskli do projeto +
- *  catálogo de versões do seletor de modelos (versões válidas + default). */
+ *  catálogo de versões do seletor de modelos (versões válidas + default).
+ *  AUTO-RECOVERY: o polling da UI deteta runs ativos sem heartbeat
+ *  (função serverless morta) e recupera com estado honesto — o
+ *  usuário vê "Falhou (interrompido)" em ≤2 min em vez de um run
+ *  "Implementando" congelado para sempre. */
 export async function GET(req: Request) {
   const user = await getSessionUser(req)
   if (!user) return NextResponse.json({ error: 'NÃO_AUTENTICADO' }, { status: 401 })
@@ -97,6 +118,19 @@ export async function GET(req: Request) {
   const projectId = url.searchParams.get('project') ?? ''
   const project = await db.project.findFirst({ where: { id: projectId, userId: user.id } })
   if (!project) return NextResponse.json({ error: 'PROJETO_NÃO_ENCONTRADO' }, { status: 404 })
+
+  // auto-recovery no polling: run ativo sem heartbeat > 2 min = morto
+  const activeStates = ['ANALYZING', 'PLANNING', 'IMPLEMENTING', 'TESTING', 'REVIEWING', 'CORRECTING', 'VERIFYING']
+  const active = await db.poskliRun.findFirst({
+    where: { projectId, state: { in: activeStates } },
+    orderBy: { startedAt: 'desc' },
+    select: { id: true, startedAt: true, updatedAt: true },
+  }).catch(() => null)
+  if (active && Date.now() - Math.max(active.startedAt.getTime(), active.updatedAt.getTime()) >= STALE_RUN_MS) {
+    after(async () => {
+      await recoverStaleRun(active.id).catch(() => {})
+    })
+  }
 
   const runs = await db.poskliRun.findMany({
     where: { projectId },

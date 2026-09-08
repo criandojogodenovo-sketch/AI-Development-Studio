@@ -166,7 +166,10 @@ export async function POST(req: Request) {
     orderBy: { startedAt: 'desc' },
   })
   if (active) {
-    const staleMs = 10 * 60 * 1000
+    // FIX do congelamento: janela de 10 min → 2 min — o heartbeat do
+    // watchdog (15s) garante updatedAt fresco enquanto o run vive;
+    // >2 min sem update = função serverless morta a meio do run.
+    const staleMs = 2 * 60 * 1000
     const lastActivity = Math.max(
       new Date(active.startedAt).getTime(),
       new Date(active.updatedAt).getTime()

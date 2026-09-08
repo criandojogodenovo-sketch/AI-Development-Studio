@@ -602,10 +602,18 @@ async function implementTask(
       ].filter(Boolean).join('\n'),
       contextBlock: [`## MEMÓRIA DO PROJETO\n${memoryToPrompt(memory)}`, fileBlock ? `## ${task.agentRole === 'review' ? 'EVIDÊNCIAS' : 'ARQUIVOS ATUAIS'}\n${fileBlock}` : ''].filter(Boolean).join('\n\n'),
       // FASE 2 — orçamento por nível (steps/timeout) + DELEGAÇÃO
-      // (tool calls e tokens do subagente)
+      // (tool calls e tokens do subagente) + CLAMP ao orçamento
+      // RESTANTE do run (fix do congelamento serverless): o subagente
+      // para ANTES da parede de maxDuration, deixando margem para o
+      // orquestrador persistir o estado final honesto em vez de a
+      // função morrer a meio de um passo (run "IMPLEMENTING" para
+      // sempre até a stale recovery).
       budget: {
         maxSteps: ctx.budget.maxSteps,
-        agentTimeoutMs: ctx.budget.agentTimeoutMs,
+        agentTimeoutMs: Math.max(
+          10_000,
+          Math.min(ctx.budget.agentTimeoutMs, ctx.deadline - Date.now() - 20_000)
+        ),
         ...(subClamp ? { maxToolCalls: subClamp.maxToolCalls, tokenBudget: subClamp.tokenBudget } : {}),
       },
     },

@@ -637,3 +637,10 @@ Stage Summary:
 - Fix: `RateLimitOptions.onStopAttempt` (chain puro, injetável) — dispara a cada tentativa de parada; router injeta `touchPoskliActivity(requestPoskliRunContext())` via ALS novo `withPoskliRunContext` (version-context.ts); orquestrador envolve o run todo
 - Testes: 286/286 (+2 CT8/CT9: tentativas notificadas, callback com erro nunca derruba; +2 R1/R2: contexto do run não vaza)
 - DEEPSEEK_MODEL também definido (warning final eliminado)
+
+### 8. Segundo teste real → melhorias de robustez (função serverless morta)
+- Evidência (run cmtsc3h6…): planner OK + aviso; 1ª tentativa do coding agent falhou honestamente em 60s (BAI qwen 30s timeout → NVIDIA 30s timeout → chain exaurido); retry FUNCIONOU (index.html criado, tools a correr); mas a função serverless morreu aos 300s (maxDuration) a meio de um passo LLM → run ficou IMPLEMENTING sem heartbeat
+- Fix A — clamp do orçamento do subagente ao RESTANTE do run (implementTask): agentTimeoutMs = min(nível, deadline - now - 20s) → o subagente para ANTES da parede de maxDuration e o orquestrador persiste estado final honesto
+- Fix B — janela stale 10 min → 2 min (heartbeat de 15s torna updatedAt fresco por construção; >2 min = função morta) em POST /api/poskli/run e POST /api/chat
+- Fix C — AUTO-RECOVERY no GET /api/poskli/run (polling da UI): run ativo sem heartbeat >2 min → recoverStaleRun via after() — o usuário vê o estado honesto em ≤2 min sem precisar de novo run
+- Testes: 286/286 · tsc 14 pré-existentes · eslint limpo
