@@ -631,3 +631,9 @@ Stage Summary:
 
 ### 6. Deploy + verificação
 - Deploy de produção (Vercel) + diagnóstico: warnings de vars vazias ELIMINADOS; execução de teste SEM congelamento em IMPLEMENTING
+
+### 7. Ajuste pós-teste real (produção): failover conta como atividade
+- Evidência do run de teste (cmtsbo8ob…): planner OK com aviso no chat; coding agent criou index.html + testes PASS; mas a chamada seguinte (testing/review: bai qwen 30s timeout → nvidia gpt-oss) levou >30s SEM touch → watchdog matou um run que estava legitimamente em failover
+- Fix: `RateLimitOptions.onStopAttempt` (chain puro, injetável) — dispara a cada tentativa de parada; router injeta `touchPoskliActivity(requestPoskliRunContext())` via ALS novo `withPoskliRunContext` (version-context.ts); orquestrador envolve o run todo
+- Testes: 286/286 (+2 CT8/CT9: tentativas notificadas, callback com erro nunca derruba; +2 R1/R2: contexto do run não vaza)
+- DEEPSEEK_MODEL também definido (warning final eliminado)

@@ -42,8 +42,9 @@ import {
   type RouteRole,
   type RouteStop,
 } from './chain'
-import { requestPoskliVersion, requestPoskliTaskProfile } from './version-context.ts'
+import { requestPoskliVersion, requestPoskliTaskProfile, requestPoskliRunContext } from './version-context.ts'
 import { routesForTaskProfile } from '../poskli/agent-pool.ts'
+import { touchPoskliActivity } from '../poskli/stall-watchdog-core.ts'
 import type { ChatMessage, CompletionResult, LLMProvider, ModelDefinition, ModelRole } from './types'
 
 // ---------- REGISTRO DE MODELOS LÓGICOS ----------
@@ -356,6 +357,10 @@ export class ModelRouter {
         // IMPLEMENTING): 30s default (MODEL_CALL_TIMEOUT_MS) —
         // estourou, o chain avança para a próxima parada do pool.
         callTimeoutMs: STUDIO_CONFIG.stall.callTimeoutMs,
+        // ATIVIDADE do watchdog por tentativa de parada: failover em
+        // curso é trabalho legítimo — o run não é morto com TIMEOUT
+        // enquanto tenta o próximo modelo do pool.
+        onStopAttempt: () => touchPoskliActivity(requestPoskliRunContext()),
       })
       result = executed.result
       if (executed.provider !== entries[0]?.provider) {

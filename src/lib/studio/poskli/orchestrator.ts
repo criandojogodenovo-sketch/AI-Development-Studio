@@ -46,7 +46,7 @@ import {
   type TestRecordSnapshot, type CorrectionSnapshot, type ReviewSnapshot, type VerificationResult,
 } from './state-machine'
 import { classifyError, type PoskliErrorCode } from './errors'
-import { withPoskliVersion, requestPoskliVersion, withPoskliTaskProfile, requestPoskliTaskProfile, type PoskliTaskProfile } from '../models/version-context.ts'
+import { withPoskliVersion, requestPoskliVersion, withPoskliTaskProfile, requestPoskliTaskProfile, withPoskliRunContext, type PoskliTaskProfile } from '../models/version-context.ts'
 import { POSKLI_VERSIONS } from '../models/chain.ts'
 import { failureSignature, agenticFixBudget, agenticFixDecision } from './loop-guard.ts'
 import { taskText } from '../orchestrator/task-text.ts'
@@ -834,8 +834,11 @@ async function applyCorrection(
 export async function runPoskli(runId: string, poskliVersion?: string): Promise<void> {
   const run = await db.poskliRun.findUnique({ where: { id: runId } }).catch(() => null)
   const request = (run?.request ?? '').trim()
+  // RUN CONTEXT (ALS): o ProviderChain toca a atividade do watchdog
+  // a cada tentativa de parada — failover em curso é trabalho.
+  const inner = () => withPoskliRunContext(runId, () => runPoskliInner(runId))
   if (!request) {
-    return withPoskliVersion(poskliVersion, () => runPoskliInner(runId))
+    return withPoskliVersion(poskliVersion, inner)
   }
   const toonTask = buildToonTask(request)
   const profile: PoskliTaskProfile = {
@@ -844,7 +847,7 @@ export async function runPoskli(runId: string, poskliVersion?: string): Promise<
     toon: parseRequestToTOON(request),
   }
   return withPoskliVersion(poskliVersion, () =>
-    withPoskliTaskProfile(profile, () => runPoskliInner(runId))
+    withPoskliTaskProfile(profile, inner)
   )
 }
 

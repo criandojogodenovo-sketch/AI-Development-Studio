@@ -67,3 +67,23 @@ export function withPoskliTaskProfile<T>(profile: PoskliTaskProfile, fn: () => P
 export function requestPoskliTaskProfile(): PoskliTaskProfile | undefined {
   return taskProfileStorage.getStore()
 }
+
+// ---------- RUN ATIVO (stall watchdog) ----------
+
+/**
+ * Id do run Poskli do contexto async atual — o ProviderChain usa
+ * isto para tocar a atividade do watchdog a cada tentativa de
+ * parada (failover em curso É atividade: um run que tenta o
+ * próximo modelo do pool não está congelado).
+ */
+const runIdStorage = new AsyncLocalStorage<string>()
+
+/** Executa fn com o runId ativo (o orquestrador envolve o run todo). */
+export function withPoskliRunContext<T>(runId: string, fn: () => Promise<T>): Promise<T> {
+  return runIdStorage.run(runId, fn)
+}
+
+/** RunId ativo deste contexto async (undefined = fora de um run). */
+export function requestPoskliRunContext(): string | undefined {
+  return runIdStorage.getStore()
+}

@@ -64,3 +64,22 @@ test('V5 — todas as 5 versões são aceitas como override válido', async () =
     assert.equal(seen, v)
   }
 })
+
+// ---------- RUN CONTEXT (stall watchdog — fix IMPLEMENTING) ----------
+
+test('R1 — withPoskliRunContext define o runId dentro do contexto', async () => {
+  const { withPoskliRunContext, requestPoskliRunContext } = await import('../src/lib/studio/models/version-context.ts')
+  assert.equal(requestPoskliRunContext(), undefined)
+  const inner = await withPoskliRunContext('run_123', async () => requestPoskliRunContext())
+  assert.equal(inner, 'run_123')
+  assert.equal(requestPoskliRunContext(), undefined, 'contexto não vaza')
+})
+
+test('R2 — herança através de awaits aninhados (orquestrador→chain)', async () => {
+  const { withPoskliRunContext, requestPoskliRunContext } = await import('../src/lib/studio/models/version-context.ts')
+  const nested = () => new Promise<string | undefined>((resolve) => {
+    setTimeout(() => resolve(requestPoskliRunContext()), 5)
+  })
+  const out = await withPoskliRunContext('run_abc', nested)
+  assert.equal(out, 'run_abc')
+})

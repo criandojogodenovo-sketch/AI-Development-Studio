@@ -262,6 +262,10 @@ export interface RateLimitOptions {
    *  Desativar apenas em testes com um valor GRANDE (ex.: 600000) —
    *  NÃO usar Infinity (setTimeout converte para 1ms). */
   callTimeoutMs?: number
+  /** Notificação de ATIVIDADE por tentativa de parada (o router
+   *  injeta o touch do watchdog do run: failover em curso é
+   *  trabalho, não congelamento). */
+  onStopAttempt?: (provider: ProviderName, model: string) => void
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -374,6 +378,12 @@ export async function executeWithChain(
 
     while (!advance) {
       tries++
+      // ATIVIDADE por tentativa: o router injeta o touch do watchdog
+      // do run — tentar um modelo (mesmo após timeout do anterior) é
+      // trabalho legítimo, não congelamento.
+      try {
+        rl.onStopAttempt?.(entry.provider, entry.model)
+      } catch { /* notificação best-effort */ }
       try {
         const result = await completeWithCallTimeout(entry, req, callTimeoutMs)
         return { result, provider: entry.provider, attempts }

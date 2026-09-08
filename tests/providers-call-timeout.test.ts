@@ -166,3 +166,39 @@ test('CT6 — promessa abandonada é inerte (sem unhandled rejection)', async ()
 test('CT7 — default do timeout global é 30s (spec do fix)', () => {
   assert.equal(MODEL_CALL_TIMEOUT_DEFAULT_MS, 30_000)
 })
+
+// ---------- CT8: atividade por tentativa de parada (watchdog) ----------
+
+test('CT8 — onStopAttempt dispara a cada tentativa de parada (failover = atividade)', async () => {
+  const seen: string[] = []
+  const hang = hangingProvider('bai')
+  const ok = okProvider('nvidia')
+  await executeWithChain(
+    [entry('bai', hang), entry('nvidia', ok)],
+    { messages: [{ role: 'user', content: 'oi' }] },
+    {
+      ...RL_FAST,
+      callTimeoutMs: 15,
+      onStopAttempt: (provider, model) => seen.push(`${provider}/${model}`),
+    }
+  )
+  // uma tentativa na parada pendente + uma na parada que assume
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0], 'bai/m')
+  assert.equal(seen[1], 'nvidia/m')
+})
+
+test('CT9 — onStopAttempt com erro no callback nunca derruba o chain', async () => {
+  const out = await executeWithChain(
+    [entry('bai', okProvider('bai'))],
+    { messages: [{ role: 'user', content: 'oi' }] },
+    {
+      ...RL_FAST,
+      callTimeoutMs: 600_000,
+      onStopAttempt: () => {
+        throw new Error('callback explodiu')
+      },
+    }
+  )
+  assert.match(out.result.content, /^ok:/, 'chain segue apesar do callback com erro')
+})
