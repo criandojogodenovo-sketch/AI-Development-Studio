@@ -644,3 +644,15 @@ Stage Summary:
 - Fix B — janela stale 10 min → 2 min (heartbeat de 15s torna updatedAt fresco por construção; >2 min = função morta) em POST /api/poskli/run e POST /api/chat
 - Fix C — AUTO-RECOVERY no GET /api/poskli/run (polling da UI): run ativo sem heartbeat >2 min → recoverStaleRun via after() — o usuário vê o estado honesto em ≤2 min sem precisar de novo run
 - Testes: 286/286 · tsc 14 pré-existentes · eslint limpo
+
+### 9. VALIDAÇÃO FINAL — run COMPLETO em produção (evidência)
+- Run cmtsctybr… ("Corrige o título da página para Página dos Pássaros"): ANALYZING (plano LLM real, 5074/427 tokens) → IMPLEMENTING (~3 min de trabalho agêntico) → **COMPLETED em 199s**
+- outcomeReason CRITÉRIOS_SATISFEITOS · testsPassed TRUE (npm test PASS) · 48697/5415 tokens · errorCode null
+- index.html verificado: `<title>Página dos Pássaros</title>` — a correção pedida foi aplicada pelo agente
+- Sequência completa de comportamento dos 4 runs de teste:
+  1. gatos → FAILED/STALL_WATCHDOG (kill honesto do watchdog — o freeze virou TIMEOUT visível)
+  2. cães → função serverless morreu aos 300s → auto-recovery no polling → PARTIAL honesto (~2 min)
+  3. pássaros → orçamento 270s esgotado → FAILED/CRITÉRIO_TASKS_FALHOU persistido ANTES da parede
+  4. título → COMPLETED com testes PASS
+- Causa residual (não-código): conta B.AI com rate limit (429 您的账户已达到速率限制) + NVIDIA 503 intermitente — os providers lentos queimam orçamento; o sistema agora degrada honestamente em vez de congelar
+- Screenshots: /home/z/my-project/download/screenshots-stall-fix/ (01-07: login, chat com resultados honestos, diagnóstico limpo, run COMPLETED, preview da página)
